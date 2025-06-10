@@ -1,0 +1,29 @@
+channels:
+  graphical_lasso: true
+  pearson_full: true
+  pearson_omst: true
+  tangent_space: true
+  wavelet_coherence: true
+features:
+  graph_topology: true
+  hmm_dynamics: true
+max_workers: auto
+parameters:
+  graphical_lasso:
+    cv_folds: 3
+  hmm:
+    covariance_type: full
+    n_iter: 150
+    n_states: 5
+paths:
+  atlas_nifti_path: /home/diego/Escritorio/AAL3/AAL3v1.nii.gz
+  base_output_dir: ./connectivity_features
+  qc_output_dir: ./qc_outputs_refactored_v1.0
+  qc_report_filename: report_qc_final.csv
+  roi_signals_dir: /home/diego/Escritorio/AAL3/ROISignals_AAL3_NiftiPreprocessedAllBatchesNorm
+preprocessing:
+  filter_order: 2
+  high_cut_hz: 0.08
+  low_cut_hz: 0.01
+  target_length_tps: 140
+  tr_seconds: 3.0

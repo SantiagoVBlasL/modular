@@ -1,0 +1,45 @@
+# =================================================
+# CONFIGURACIÓN PARA EL PIPELINE DE QC DE BOLD fMRI
+# =================================================
+
+# --- Rutas de entrada/salida ---
+paths:
+  roi_dir: '/home/diego/Escritorio/AAL3_pro/ROISignalsAAL3'
+  subjects_csv: '/home/diego/Escritorio/AAL3_pro/SubjectsData_Schaefer400.csv'
+  aal3_meta: '/home/diego/Escritorio/AAL3_pro/ROI_MNI_V7_vol.txt'
+  export_dir: './qc_outputs_refactored_v1.0'
+
+# --- Parámetros del Atlas y ROIs ---
+atlas:
+  raw_expected_rois: 170
+  aal3_missing_indices_1based: [35, 36, 81, 82]
+  # --- LÍNEA NUEVA AÑADIDA ---
+  # Este es el número de ROIs que quedan después de quitar los inválidos (170 - 4 = 166)
+  expected_rois_after_aal3_removal: 166
+  small_roi_voxel_threshold: 100
+
+# --- Parámetros de Detección de Outliers ---
+outliers:
+  # Criterios univariantes
+  univariate:
+    z_threshold: 3.5
+    method: 'robust' # 'robust' (median/mad) o 'standard' (mean/std)
+
+  # Criterios multivariantes
+  multivariate:
+    alpha_mahalanobis: 0.001
+    # Estrategia de estimación de covarianza: 'MCD', 'LedoitWolf', o 'auto'
+    # 'auto' usará MCD si es posible, si no, Ledoit-Wolf.
+    covariance_estimator: 'auto'
+    min_tp_for_ledoitwolf: 50
+    min_tp_for_mcd_strict_factor: 1.1 # TPs > ROIs * factor
+    min_timepoints_for_any_mv: 30
+
+# --- Criterios de Exclusión de Sujetos ---
+exclusion_criteria:
+  min_timepoints: 140
+  max_nan_pct: 5.0
+  max_null_channels_pct: 1.0 # Para canales nulos en datos crudos (170 ROIs)
+  max_univ_outliers_pct: 2
+  max_mv_outliers_pct: 10
+  exclude_if_mv_skipped: true
