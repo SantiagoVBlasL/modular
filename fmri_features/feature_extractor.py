@@ -63,23 +63,22 @@ def extract_graph_features(matrix: np.ndarray, subject_id: str) -> Dict[str, Any
     if not BCT_AVAILABLE:
         log.warning("Librería 'bctpy' no encontrada. Omitiendo características de topología.")
         return None
-    
+
     log.debug(f"Sujeto {subject_id}: Extrayendo características de topología de grafos...")
     try:
-        # Normalizar para métricas que lo requieran (ej. coef. de clustering)
-        # Asegura que los pesos sean positivos
         matrix_norm = matrix.copy()
         if np.any(matrix_norm < 0):
              matrix_norm = (matrix_norm - np.min(matrix_norm)) / (np.max(matrix_norm) - np.min(matrix_norm))
         np.fill_diagonal(matrix_norm, 0)
-        
-        # Invertir pesos para calcular la ruta más corta
-        dist_matrix = bct.weight_conversion(matrix_norm, 'lengths')
 
-        char_path, efficiency = bct.charpath(dist_matrix)
+        # --- CORRECCIÓN ---
+        charpath_results = bct.charpath(matrix_norm)
+        char_path = charpath_results[0]
+        efficiency = charpath_results[1]
+
         modularity_louvain, _ = bct.modularity_und(matrix_norm)
         mean_clustering = np.mean(bct.clustering_coef_wu(matrix_norm))
-        
+
         return {
             'topo_global_efficiency': efficiency,
             'topo_modularity': modularity_louvain,
@@ -87,5 +86,5 @@ def extract_graph_features(matrix: np.ndarray, subject_id: str) -> Dict[str, Any
             'topo_mean_clustering_coef': mean_clustering,
         }
     except Exception as e:
-        log.error(f"Sujeto {subject_id}: Fallo la extracción de topología - {e}")
+        log.error(f"Sujeto {subject_id}: Fallo la extracción de topología - {e}", exc_info=True)
         return None

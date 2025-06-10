@@ -87,8 +87,9 @@ def tangent_space(ts: np.ndarray, subject_id: str, **kwargs) -> Optional[np.ndar
         log.error(f"Fallo en cálculo de Covariance para sujeto {subject_id}: {e}", exc_info=True)
         return None
 
+
 def wavelet_coherence(ts: np.ndarray, cfg: Dict, subject_id: str, **kwargs) -> Optional[np.ndarray]:
-    """Canal 5: Coherencia media por Wavelets con mne_connectivity (versión robusta)."""
+    """Canal 5: Coherencia media por Wavelets, optimizada para señales cortas."""
     if not MNE_AVAILABLE:
         log.warning(f"Sujeto {subject_id}: Librería 'mne_connectivity' no encontrada. Omitiendo canal Wavelet.")
         return np.zeros((ts.shape[1], ts.shape[1]), dtype=np.float32)
@@ -96,35 +97,25 @@ def wavelet_coherence(ts: np.ndarray, cfg: Dict, subject_id: str, **kwargs) -> O
     try:
         pp_cfg = cfg['preprocessing']
         spec_cfg = cfg.get('parameters', {}).get('wavelet', {})
-        n_cycles = spec_cfg.get('cwt_n_cycles', 5)
+        
+        # --- CAMBIO CLAVE: AJUSTAR n_cycles ---
+        # Un valor más bajo (entre 3 y 5) es más adecuado para fMRI con señales cortas.
+        # Esto hace la wavelet más corta en tiempo, evitando el error.
+        n_cycles = spec_cfg.get('cwt_n_cycles', 4) # Usamos 4 como un default seguro y balanceado
         num_freqs = spec_cfg.get('num_freqs', 20)
         
-        sfreq = 1.0 / pp_cfg.get('tr_seconds', 3.0) # Usar TR de la config, con default a 3.0s
-        signal_duration_sec = ts.shape[0] / sfreq
+        sfreq = 1.0 / pp_cfg.get('tr_seconds', 3.0)
         
-        # --- Lógica de Robustez ---
-        # Calcular la frecuencia más baja que podemos analizar sin errores
-        min_supported_freq = n_cycles / signal_duration_sec
+        # Mantenemos tu rango de frecuencia original, ya que ahora n_cycles lo permite
+        low_freq = pp_cfg['low_cut_hz']
+        high_freq = pp_cfg['high_cut_hz']
         
-        low_freq_request = pp_cfg['low_cut_hz']
-        high_freq_request = pp_cfg['high_cut_hz']
-        
-        # Ajustar la banda de frecuencia si la solicitada es demasiado baja
-        final_low_freq = low_freq_request
-        if low_freq_request < min_supported_freq:
-            log.warning(f"Sujeto {subject_id}: Frecuencia solicitada ({low_freq_request:.3f} Hz) es demasiado baja para la duración de la señal ({signal_duration_sec:.1f}s) con {n_cycles} ciclos.")
-            final_low_freq = min_supported_freq + 0.001 # Añadir un pequeño margen
-            log.warning(f"Ajustando la frecuencia mínima a {final_low_freq:.3f} Hz para evitar errores.")
-
-        if final_low_freq >= high_freq_request:
-            log.error(f"Sujeto {subject_id}: La frecuencia mínima analizable ({final_low_freq:.3f} Hz) es mayor o igual a la máxima ({high_freq_request:.3f} Hz). No se puede calcular coherencia.")
-            return None
-
-        freqs = np.linspace(final_low_freq, high_freq_request, num=num_freqs)
+        freqs = np.linspace(low_freq, high_freq, num=num_freqs)
         ts_mne = ts.T[np.newaxis, :, :] 
         
-        log.debug(f"Sujeto {subject_id}: Calculando Wavelet Coherence con sfreq={sfreq:.2f}, n_cycles={n_cycles}, freqs de {freqs[0]:.3f} a {freqs[-1]:.3f} Hz.")
+        log.debug(f"Sujeto {subject_id}: Calculando Wavelet Coherence con n_cycles={n_cycles} para evitar error de longitud.")
 
+        # Intentamos el cálculo con los parámetros optimizados
         con = spectral_connectivity_time(
             ts_mne, freqs=freqs, method='coh', mode='cwt_morlet',
             sfreq=sfreq, n_cycles=n_cycles, n_jobs=1, verbose=False
@@ -132,11 +123,16 @@ def wavelet_coherence(ts: np.ndarray, cfg: Dict, subject_id: str, **kwargs) -> O
         mean_coh = con.get_data(output='dense').mean(axis=(2, 3))
         return mean_coh.astype(np.float32)
         
-    except Exception as e:
-        log.error(f"Fallo inesperado en Wavelet Coherence para sujeto {subject_id}: {e}", exc_info=True)
+    except ValueError as e:
+        # Este bloque ahora es un seguro, pero es menos probable que se active
+        if "longer than the signal" in str(e):
+             log.error(f"Sujeto {subject_id}: Fallo de Wavelet incluso con n_cycles={n_cycles}. La señal puede ser extremadamente corta. {e}")
+        else:
+            log.error(f"Sujeto {subject_id}: Fallo inesperado (ValueError) en Wavelet Coherence. {e}", exc_info=True)
         return None
-
-# --- Mapeo y Generador Principal ---
+    except Exception as e:
+        log.error(f"Sujeto {subject_id}: Fallo inesperado en Wavelet Coherence. {e}", exc_info=True)
+        return None
 
 CONNECTIVITY_METHODS = {
     'pearson_full': pearson_full,

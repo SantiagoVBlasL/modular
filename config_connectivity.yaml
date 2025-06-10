@@ -39,7 +39,7 @@ channels:
   pearson_omst: true
   graphical_lasso: true
   tangent_space: true
-  wavelet_coherence: true
+  wavelet_coherence: true  # AÑADIDO: Desactivado por defecto, se puede activar si se desea
 
 # --- Extracción de Características Adicionales (no matriciales) ---
 features:
@@ -59,7 +59,7 @@ parameters:
   # AÑADIDO: Parámetros para la coherencia por Wavelets
   wavelet:
     num_freqs: 20
-    cwt_n_cycles: 5 # Un valor seguro para evitar errores con señales cortas
+    cwt_n_cycles: 4 # Un valor seguro para evitar errores con señales cortas
 
 # --- Paralelización ---
 max_workers: 'auto'

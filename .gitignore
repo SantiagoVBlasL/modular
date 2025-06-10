@@ -1,0 +1,17 @@
+# Archivos de caché de Python
+__pycache__/
+*.pyc
+
+# Carpetas de resultados de los pipelines
+connectivity_features/
+qc_outputs_refactored_v1.0/
+debug_outputs/
+
+# Archivos de log y temporales
+*.log
+ListOfErrorsWithData.txt
+
+# Archivos del sistema operativo y editores
+.DS_Store
+.vscode/
+*.ipynb_checkpoints
