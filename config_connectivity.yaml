@@ -20,15 +20,26 @@ preprocessing:
   filter_order: 2
   target_length_tps: 140
 
-# --- Selección de Canales (TODOS ACTIVOS) ---
+# --- Selección de Canales (Ahora con más opciones) ---
 channels:
+  # Base
   pearson_full: true
-  pearson_omst: true
   graphical_lasso: true
+  # Dinámica
+  sliding_std_corr: true
+  # No Lineal
+  distance_corr_full: true
+  mutual_info_full: true # Lento, activar con cautela
+  # Dirigida
+  granger_pairwise: true   # Muy lento, activar con cautela
+  # Frecuencia
+  wavelet_coh_slow: false
+  wavelet_coh_fast: false
+  # Opcionales del pipeline anterior
+  pearson_omst: true
   tangent_space: true
-  wavelet_coherence: false # Activado gracias a las correcciones
 
-# --- Características Adicionales ---
+# --- Características Adicionales (sin cambios) ---
 features:
   hmm_dynamics: true
   graph_topology: true
@@ -41,11 +52,22 @@ parameters:
     covariance_type: 'diag'
   
   graphical_lasso:
-    cv_folds: 3 # Reducido para aligerar el cómputo
+    cv_folds: 3
 
   wavelet:
-    num_freqs: 15 # Reducido para aligerar el cómputo
-    cwt_n_cycles: 3 # El ajuste clave para que funcione con señales cortas
+    num_freqs_per_band: 10 # Menos freqs por banda para acelerar
+    cwt_n_cycles: 4
 
-# --- Paralelización (CONTROL DE RECURSOS) ---
-max_workers: 4 # Un valor seguro y razonablemente rápido para tu máquina
+  # --- Nuevos parámetros ---
+  mutual_info:
+    n_bins: 8 # Número de bins para discretizar la señal
+
+  granger:
+    max_lag: 1 # Lag para la causalidad de Granger
+
+  sliding_window:
+    win_len: 30 # 30 TRs = 90 segundos
+    step: 5     # Paso de 5 TRs
+
+# --- Paralelización ---
+max_workers: 4
