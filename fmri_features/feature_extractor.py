@@ -72,6 +72,8 @@ def extract_graph_features(matrix: np.ndarray, subject_id: str) -> Dict[str, Any
         np.fill_diagonal(matrix_norm, 0)
 
         # --- CORRECCIÓN ---
+        # Se recibe la salida en una sola variable para evitar el error de desempaquetado.
+        # Y se llama con la matriz de pesos (matrix_norm) directamente.
         charpath_results = bct.charpath(matrix_norm)
         char_path = charpath_results[0]
         efficiency = charpath_results[1]

@@ -86,9 +86,6 @@ def _homogenize_length(ts: np.ndarray, target_len: int) -> np.ndarray:
     f = interp1d(x_old, ts, axis=0, kind='linear', fill_value="extrapolate")
     return f(x_new)
 
-# --- FUNCIÓN MODIFICADA ---
-# --- Reemplaza la función completa en fmri_features/data_loader.py con esto ---
-
 def load_and_preprocess_ts(subject_id: str, cfg: Dict, rois_to_remove: List[int]) -> np.ndarray | None:
     """Carga, limpia, preprocesa y devuelve la serie temporal de un sujeto."""
     roi_dir = Path(cfg['paths']['roi_signals_dir'])
@@ -121,20 +118,18 @@ def load_and_preprocess_ts(subject_id: str, cfg: Dict, rois_to_remove: List[int]
         fs = 1.0 / pp_cfg['tr_seconds']
         ts_filtered = _bandpass_filter(ts_cleaned, pp_cfg['low_cut_hz'], pp_cfg['high_cut_hz'], fs, pp_cfg['filter_order'])
         
-        # --- ESTA ES LA SECCIÓN CORREGIDA ---
-        # Detectar y ADVERTIR sobre ROIs con varianza cero, PERO NO ELIMINARLOS.
+        # Detectar y ADVERTIR sobre ROIs con varianza cero, PERO NO ELIMINARLOS
         std_devs = np.std(ts_filtered, axis=0)
         zero_var_mask = std_devs < 1e-8
         
         if np.any(zero_var_mask):
             log.warning(f"Sujeto {subject_id}: Se encontraron {np.sum(zero_var_mask)} ROIs con varianza cero. NO se eliminarán para mantener la dimensión.")
-            # La línea que causaba el error (`ts_filtered = ts_filtered[:, ~zero_var_mask]`) ha sido eliminada.
         
         if ts_filtered.shape[1] == 0:
              log.error(f"Sujeto {subject_id}: No quedaron ROIs después de la limpieza inicial.")
              return None
 
-        # StandardScaler manejará correctamente las columnas con varianza cero (las dejará como ceros).
+        # StandardScaler manejará correctamente las columnas con varianza cero (las dejará como ceros)
         ts_scaled = StandardScaler().fit_transform(ts_filtered)
         
         ts_final = _homogenize_length(ts_scaled, pp_cfg['target_length_tps'])

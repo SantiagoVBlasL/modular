@@ -1,25 +1,12 @@
-# ================================================================
-# CONFIGURACIÓN PARA EL PIPELINE DE EXTRACCIÓN DE CONECTIVIDAD fMRI
-# ================================================================
-
-# --- Rutas de Entrada/Salida ---
+# --- Rutas (asegúrate de que sean correctas) ---
 paths:
-  # Directorio donde se guardó el reporte del QC
   qc_output_dir: './qc_outputs_refactored_v1.0'
-  
-  # Archivo CSV final del QC con los flags de descarte
   qc_report_filename: 'report_qc_final.csv'
-
-  # Directorio donde se guardarán las nuevas matrices de conectividad
   base_output_dir: './connectivity_features'
-
-  # Ruta al directorio con los archivos .mat de las señales de los ROIs
   roi_signals_dir: '/home/diego/Escritorio/AAL3/ROISignals_AAL3_NiftiPreprocessedAllBatchesNorm'
-  
-  # (Opcional) Ruta al atlas en formato NIfTI para reordenamiento de ROIs
   atlas_nifti_path: '/home/diego/Escritorio/AAL3/AAL3v1.nii.gz'
 
-# --- Parámetros del Atlas y ROIs ---
+# --- Atlas y ROIs ---
 atlas:
   aal3_meta_path: '/home/diego/Escritorio/AAL3/ROI_MNI_V7_vol.txt'
   aal3_missing_indices_1based: [35, 36, 81, 82]
@@ -28,38 +15,37 @@ atlas:
 # --- Preprocesamiento de Series Temporales ---
 preprocessing:
   tr_seconds: 3.0
-  low_cut_hz: 0.015  # CAMBIO CLAVE: Aumentado ligeramente para dar estabilidad a Wavelet con TR=3s
+  low_cut_hz: 0.01  # Umbral seguro para evitar errores en wavelet
   high_cut_hz: 0.08
   filter_order: 2
   target_length_tps: 140
 
-# --- Selección de Canales de Conectividad (Métricas) ---
+# --- Selección de Canales (TODOS ACTIVOS) ---
 channels:
   pearson_full: true
   pearson_omst: true
   graphical_lasso: true
   tangent_space: true
-  wavelet_coherence: true  # AÑADIDO: Desactivado por defecto, se puede activar si se desea
+  wavelet_coherence: false # Activado gracias a las correcciones
 
-# --- Extracción de Características Adicionales (no matriciales) ---
+# --- Características Adicionales ---
 features:
   hmm_dynamics: true
   graph_topology: true
 
-# --- Parámetros Específicos de las Métricas ---
+# --- Parámetros Específicos ---
 parameters:
   hmm:
     n_states: 5
     n_iter: 150
-    covariance_type: 'full'
+    covariance_type: 'diag'
   
   graphical_lasso:
-    cv_folds: 3
+    cv_folds: 3 # Reducido para aligerar el cómputo
 
-  # AÑADIDO: Parámetros para la coherencia por Wavelets
   wavelet:
-    num_freqs: 20
-    cwt_n_cycles: 4 # Un valor seguro para evitar errores con señales cortas
+    num_freqs: 15 # Reducido para aligerar el cómputo
+    cwt_n_cycles: 3 # El ajuste clave para que funcione con señales cortas
 
-# --- Paralelización ---
-max_workers: 'auto'
+# --- Paralelización (CONTROL DE RECURSOS) ---
+max_workers: 4 # Un valor seguro y razonablemente rápido para tu máquina

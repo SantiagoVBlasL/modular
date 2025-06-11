@@ -98,24 +98,20 @@ def wavelet_coherence(ts: np.ndarray, cfg: Dict, subject_id: str, **kwargs) -> O
         pp_cfg = cfg['preprocessing']
         spec_cfg = cfg.get('parameters', {}).get('wavelet', {})
         
-        # --- CAMBIO CLAVE: AJUSTAR n_cycles ---
-        # Un valor más bajo (entre 3 y 5) es más adecuado para fMRI con señales cortas.
-        # Esto hace la wavelet más corta en tiempo, evitando el error.
-        n_cycles = spec_cfg.get('cwt_n_cycles', 4) # Usamos 4 como un default seguro y balanceado
+        # --- AJUSTE CLAVE PARA SEÑALES CORTAS ---
+        n_cycles = spec_cfg.get('cwt_n_cycles', 4) # Un valor bajo (3-5) es ideal
         num_freqs = spec_cfg.get('num_freqs', 20)
         
         sfreq = 1.0 / pp_cfg.get('tr_seconds', 3.0)
         
-        # Mantenemos tu rango de frecuencia original, ya que ahora n_cycles lo permite
         low_freq = pp_cfg['low_cut_hz']
         high_freq = pp_cfg['high_cut_hz']
         
         freqs = np.linspace(low_freq, high_freq, num=num_freqs)
         ts_mne = ts.T[np.newaxis, :, :] 
         
-        log.debug(f"Sujeto {subject_id}: Calculando Wavelet Coherence con n_cycles={n_cycles} para evitar error de longitud.")
+        log.debug(f"Sujeto {subject_id}: Calculando Wavelet Coherence con n_cycles={n_cycles}.")
 
-        # Intentamos el cálculo con los parámetros optimizados
         con = spectral_connectivity_time(
             ts_mne, freqs=freqs, method='coh', mode='cwt_morlet',
             sfreq=sfreq, n_cycles=n_cycles, n_jobs=1, verbose=False
@@ -124,7 +120,6 @@ def wavelet_coherence(ts: np.ndarray, cfg: Dict, subject_id: str, **kwargs) -> O
         return mean_coh.astype(np.float32)
         
     except ValueError as e:
-        # Este bloque ahora es un seguro, pero es menos probable que se active
         if "longer than the signal" in str(e):
              log.error(f"Sujeto {subject_id}: Fallo de Wavelet incluso con n_cycles={n_cycles}. La señal puede ser extremadamente corta. {e}")
         else:
