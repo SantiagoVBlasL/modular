@@ -1,18 +1,27 @@
 # scripts/analyze_and_visualize_results.py
 """
-Script avanzado para el análisis exploratorio y visualización de los resultados
-del pipeline de conectividad, diseñado para funcionar mientras el pipeline principal
-aún está en ejecución.
+Script de Análisis Exploratorio Exhaustivo para Tesis Doctoral
 
-Funcionalidades:
-1.  Usa argparse para flexibilidad en la selección de la ejecución y metadatos.
-2.  Escanea una carpeta de ejecución en busca de tensores .npy ya procesados.
-3.  Crea una "galería" de matrices de conectividad para varios sujetos por grupo.
-4.  Recalcula características escalares (Topología) para los sujetos encontrados.
-5.  Genera gráficos de distribución mejorados (violin plots).
-6.  Crea un "clustermap" de correlación para identificar la estructura de las características.
-7.  Añade un análisis de PCA (scree plot) como paso previo al VAE.
-8.  Mejora la gestión de memoria y la estética de los gráficos.
+Este script realiza un análisis exploratorio completo de los resultados del pipeline
+de conectividad. Su objetivo es la inspección de datos, la generación de
+visualizaciones para publicación y la creación de un conjunto de datos consolidado
+y limpio, listo para futuras etapas de modelado.
+
+Funcionalidades Clave:
+1.  Análisis de Conectomas por Grupo:
+    - Calcula y grafica las matrices de conectividad PROMEDIO por grupo (CN, MCI, AD).
+    - Calcula y grafica las matrices de DIFERENCIA (ej. AD - CN) con escalas de
+      color optimizadas por canal para resaltar alteraciones.
+2.  Análisis Estadístico y de Características:
+    - Realiza tests de Kruskal-Wallis para comparar características entre grupos.
+    - Estima la importancia de características de forma exploratoria con RandomForest.
+3.  Análisis Exploratorio y Visualización:
+    - Genera un clustermap de correlación para entender la estructura de las características.
+    - Muestra la distribución de cada característica por grupo mediante violin plots.
+    - Proyecta los datos en 2D usando PCA y UMAP para visualizar la separabilidad de los grupos.
+4.  Exportación de Datos Consolidados:
+    - Guarda un único archivo CSV con todos los sujetos, sus características procesadas y
+      metadatos relevantes, sirviendo como un "datasheet" final para la etapa de modelado.
 """
 import sys
 import yaml
@@ -25,242 +34,265 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+import umap
+from tqdm import tqdm
 from typing import Optional, Dict, List, Tuple
-from tqdm import tqdm # <-- CORRECCIÓN: Importación correcta de tqdm
+from scipy.stats import kruskal
+from scikit_posthocs import posthoc_dunn
 
 # --- Añadir el directorio raíz del proyecto al path ---
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
-from fmri_features import feature_extractor
-
 # --- Configuración del Estilo y Logging ---
-sns.set_theme(style='whitegrid', context='notebook')
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+sns.set_theme(style='whitegrid', context='notebook', palette='viridis')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 log = logging.getLogger(__name__)
 
 
-# --- Funciones de Carga de Datos ---
-def find_and_load_interim_data(run_dir_name: str, meta_file: str) -> Optional[Tuple[pd.DataFrame, Dict, Path]]:
-    """Escanea la carpeta de ejecución, encuentra tensores .npy y los une con metadatos."""
+# --- 1. CARGA Y CONSOLIDACIÓN DE DATOS ---
+
+def load_and_consolidate_data(run_dir_name: str, meta_file: str) -> Optional[Tuple[pd.DataFrame, Dict, Path]]:
+    """Carga el reporte final, lo une con metadatos y maneja columnas duplicadas."""
     run_path = project_root / 'connectivity_features' / run_dir_name
+    report_path = run_path / "salvaged_analysis" / "final_report_with_features.csv"
     config_path = run_path / 'config_used.yaml'
-    
-    if not run_path.exists() or not config_path.exists():
-        log.error(f"La carpeta de ejecución '{run_dir_name}' o su config.yaml no existen.")
+
+    if not report_path.exists():
+        log.error(f"No se encontró el reporte final 'final_report_with_features.csv' en {report_path.parent}.")
+        log.error("Por favor, ejecuta primero el script 'salvage_and_analyze.py' para generarlo.")
         return None
 
-    log.info(f"Escaneando resultados intermedios desde: {run_path}")
+    log.info(f"Cargando reporte consolidado desde: {report_path}")
+    df = pd.read_csv(report_path)
+    
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
 
-    tensor_files = list(run_path.glob('tensor_*.npy'))
-    if not tensor_files:
-        log.warning("No se encontraron archivos de tensor .npy. ¿Seguro que el pipeline ya ha procesado algunos sujetos?")
-        return None
-
-    log.info(f"Se encontraron {len(tensor_files)} tensores de sujetos ya procesados.")
-    
-    processed_subjects = [{'subject_id': f.stem.split('tensor_')[-1], 'tensor_path': str(f)} for f in tensor_files]
-    processed_df = pd.DataFrame(processed_subjects)
-
-    meta_path = project_root / meta_file
-    if not meta_path.exists():
-        log.error(f"No se encontró el archivo de metadatos: {meta_path}")
-        return None
-    meta_df = pd.read_csv(meta_path)
-    
-    processed_df['subject_id'] = processed_df['subject_id'].astype(str)
+    meta_df = pd.read_csv(project_root / meta_file)
+    df['subject_id'] = df['subject_id'].astype(str)
     meta_df['SubjectID'] = meta_df['SubjectID'].astype(str)
-    meta_df = meta_df[['SubjectID', 'ResearchGroup']].rename(columns={'SubjectID': 'subject_id'})
-    full_df = pd.merge(processed_df, meta_df, on='subject_id', how='left')
+    
+    merged_df = pd.merge(df, meta_df.rename(columns={'SubjectID': 'subject_id'}), on='subject_id', how='left')
 
-    return full_df, cfg, run_path
+    cols_x = [c for c in merged_df.columns if c.endswith('_x')]
+    for col_x in cols_x:
+        base_name = col_x[:-2]
+        col_y = f"{base_name}_y"
+        if col_y in merged_df.columns:
+            merged_df[base_name] = merged_df[col_x].fillna(merged_df[col_y])
+            merged_df.drop(columns=[col_x, col_y], inplace=True)
 
-# --- Funciones de Visualización y Análisis ---
+    log.info(f"Datos cargados y consolidados para {len(merged_df)} sujetos.")
+    return merged_df, cfg, run_path
 
-def plot_connectivity_gallery(df: pd.DataFrame, cfg: dict, save_dir: Path, n_samples: int = 3):
-    """Crea una "galería" de matrices de conectividad para varios sujetos por grupo."""
-    log.info(f"Generando galería de conectomas para {n_samples} sujetos por grupo...")
+
+# --- 2. ANÁLISIS EXPLORATORIO Y VISUALIZACIÓN ---
+
+def plot_group_connectome_analysis(df: pd.DataFrame, cfg: dict, save_dir: Path):
+    """Calcula y grafica las matrices promedio y de diferencia entre grupos."""
+    log.info("Análisis de conectomas por grupo (promedios y diferencias)...")
     groups = ['CN', 'MCI', 'AD']
     channel_names = [name for name, enabled in cfg.get('channels', {}).items() if enabled]
+    n_channels = len(channel_names)
     
+    tensors = {row['subject_id']: np.load(row['tensor_path']) for _, row in df.iterrows()}
+    
+    group_means = {}
     for group in groups:
-        group_df = df[df['ResearchGroup'] == group]
-        if group_df.empty:
-            continue
+        subject_ids = df[df['ResearchGroup'] == group]['subject_id']
+        group_tensors = [tensors[sid] for sid in subject_ids if sid in tensors]
+        if group_tensors:
+            group_means[group] = np.mean(np.stack(group_tensors), axis=0)
+
+    # Graficar matrices promedio
+    fig, axes = plt.subplots(n_channels, len(groups), figsize=(len(groups) * 5, n_channels * 4.5), squeeze=False, constrained_layout=True)
+    fig.suptitle('Matrices de Conectividad Promedio por Grupo', fontsize=20, y=1.03)
+    for i, ch_name in enumerate(channel_names):
+        for j, group in enumerate(groups):
+            ax = axes[i, j]
+            if group in group_means:
+                matrix = group_means[group][i, :, :]
+                im = ax.imshow(matrix, cmap='viridis', interpolation='none')
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            ax.set_title(f'{group} - {ch_name.replace("_", " ").title()}')
+    plt.savefig(save_dir / 'connectomas_promedio_por_grupo.png', dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+    # --- CORRECCIÓN DE VISUALIZACIÓN ---
+    # Graficar matrices de diferencia con escala de color individual
+    if 'AD' in group_means and 'CN' in group_means:
+        fig, axes = plt.subplots(1, n_channels, figsize=(n_channels * 5, 4.5), squeeze=False, constrained_layout=True)
+        fig.suptitle('Diferencia de Conectividad (AD - CN)', fontsize=20, y=1.03)
+        diff_tensor = group_means['AD'] - group_means['CN']
         
-        # Usar una semilla para reproducibilidad en el muestreo
-        sample_df = group_df.sample(min(n_samples, len(group_df)), random_state=42)
-        
-        for _, subject_row in sample_df.iterrows():
-            subject_id, tensor_path = subject_row['subject_id'], subject_row['tensor_path']
-            log.debug(f"Graficando para {subject_id} ({group})")
-            
-            # Usar mmap_mode para no cargar todo el tensor en RAM de golpe
-            tensor = np.load(tensor_path, mmap_mode='r')
-            
-            n_channels = tensor.shape[0]
-            fig, axes = plt.subplots(1, n_channels, figsize=(n_channels * 4.5, 5), constrained_layout=True)
-            if n_channels == 1: axes = [axes]
-            fig.suptitle(f'Conectomas ({group}) - Sujeto: {subject_id}', fontsize=18)
+        for i, ch_name in enumerate(channel_names):
+            ax = axes[0, i]
+            diff_matrix = diff_tensor[i, :, :]
+            # Calcular límite de color simétrico para CADA canal
+            vmax = np.percentile(np.abs(diff_matrix), 99) # Usar percentil 99 para robustez a outliers
+            if vmax > 0:
+                im = ax.imshow(diff_matrix, cmap='coolwarm', vmin=-vmax, vmax=vmax, interpolation='none')
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            else: # Si no hay diferencia, mostrar matriz gris
+                ax.imshow(diff_matrix, cmap='coolwarm', vmin=-1, vmax=1)
+            ax.set_title(ch_name.replace("_", " ").title())
 
-            for i in range(n_channels):
-                ax = axes[i]
-                matrix = tensor[i, :, :]
-                # Escala de color individual y robusta por canal
-                vmin, vmax = np.percentile(matrix, [2, 98])
-                
-                im = axes[i].imshow(matrix, cmap='viridis', vmin=vmin, vmax=vmax, interpolation='none')
-                axes[i].set_title(channel_names[i].replace('_', ' ').title(), fontsize=12)
-                axes[i].set_xticks([]); axes[i].set_yticks([]) # Limpiar ejes
-                fig.colorbar(im, ax=axes[i], fraction=0.046, pad=0.04)
+        plt.savefig(save_dir / 'connectomas_diferencia_AD-CN.png', dpi=200, bbox_inches='tight')
+        plt.close(fig)
 
-            plt.savefig(save_dir / f'gallery_matrices_{subject_id}.png', dpi=150, bbox_inches='tight')
-            plt.close(fig)
-            # Liberar memoria explícitamente
-            del tensor
-            gc.collect()
+    del tensors; gc.collect()
 
-def plot_feature_distributions(df: pd.DataFrame, save_dir: Path):
-    """Crea violin plots de las características escalares por grupo de diagnóstico."""
-    feature_cols = [col for col in df.columns
-                    if col.startswith(('topo_', 'hmm_'))
-                    and pd.api.types.is_numeric_dtype(df[col])]
-    if not feature_cols: return
+def plot_feature_distributions(df: pd.DataFrame, feature_cols: list, save_dir: Path):
     log.info("Generando gráficos de distribución de características (Violin Plots)...")
-    
     n_features = len(feature_cols)
     n_cols = min(4, n_features)
     n_rows = (n_features + n_cols - 1) // n_cols
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 5, n_rows * 5), constrained_layout=True)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 5, n_rows * 4.5), constrained_layout=True)
     axes = axes.flatten()
-
     for i, col in enumerate(feature_cols):
         sns.violinplot(data=df, x='ResearchGroup', y=col, ax=axes[i], order=['CN', 'MCI', 'AD'], inner='quartile', cut=0)
-        sns.stripplot(data=df, x='ResearchGroup', y=col, ax=axes[i], color=".25", size=3, jitter=0.2, order=['CN', 'MCI', 'AD'])
         axes[i].set_title(col.replace('_', ' ').title())
         axes[i].set_xlabel(None); axes[i].set_ylabel("Valor")
-
     for j in range(i + 1, len(axes)): axes[j].set_visible(False)
     plt.savefig(save_dir / 'distribucion_caracteristicas_violin.png', dpi=200, bbox_inches='tight')
     plt.close(fig)
 
-def plot_feature_clustermap(df: pd.DataFrame, save_dir: Path):
-    """Crea un clustermap de la correlación de Spearman para ver la estructura de las características."""
-    # 1. solo numéricas y con varianza > 0
-    num_cols = [c for c in df.columns
-                if c.startswith(('topo_', 'hmm_'))
-                and pd.api.types.is_numeric_dtype(df[c])]
-    feature_cols = [c for c in num_cols if df[c].std(skipna=True) > 0]
-    if len(feature_cols) < 2: return
+def plot_feature_clustermap(df: pd.DataFrame, feature_cols: list, save_dir: Path):
     log.info("Generando clustermap de correlación de características...")
-    
     corr_matrix = df[feature_cols].corr(method='spearman')
-
-    # 2. quitar valores no finitos
-    corr_matrix = corr_matrix.replace([np.inf, -np.inf], np.nan)
-    corr_matrix = corr_matrix.dropna(axis=0, how='any').dropna(axis=1, how='any')
-    if corr_matrix.shape[0] < 2:
-        log.warning("No quedan columnas suficientes (todas constantes o con NaNs).")
-        return
-    
-    g = sns.clustermap(corr_matrix, cmap='viridis', annot=True, fmt='.2f', figsize=(18, 18), annot_kws={"size": 8})
-    g.fig.suptitle('Clustermap de Correlación de Spearman entre Características', fontsize=20)
-    plt.setp(g.ax_heatmap.get_xticklabels(), rotation=90)
-    plt.setp(g.ax_heatmap.get_yticklabels(), rotation=0)
-    
+    g = sns.clustermap(corr_matrix, cmap='viridis', annot=False, figsize=(16, 16))
+    g.fig.suptitle('Clustermap de Correlación (Spearman) entre Características', fontsize=20, y=1.02)
     plt.savefig(save_dir / 'clustermap_correlacion_caracteristicas.png', dpi=200, bbox_inches='tight')
     plt.close()
 
-def plot_pca_scree(df: pd.DataFrame, save_dir: Path):
-    """Realiza un PCA sobre las características y muestra un scree plot."""
-    feature_cols = [col for col in df.columns
-                    if col.startswith(('topo_', 'hmm_'))
-                    and pd.api.types.is_numeric_dtype(df[col])]
-    if len(feature_cols) < 2:
-        return
-    log.info("Generando scree plot de PCA para análisis Pre-VAE...")
-    
-    features = df[feature_cols].dropna()
-    
-    # Eliminar Inf/-Inf explícitamente antes de escalar
-    features = features.replace([np.inf, -np.inf], np.nan).dropna()
 
-    if features.empty or features.shape[1] < 2:
-        log.warning("No hay suficientes datos después de eliminar valores infinitos.")
-        return
+# --- 3. ANÁLISIS ESTADÍSTICO Y DE CARACTERÍSTICAS ---
+def perform_statistical_tests(df: pd.DataFrame, feature_cols: List[str], save_dir: Path):
+    log.info("Realizando pruebas estadísticas (Kruskal-Wallis) para comparar grupos...")
+    results = []
+    for feature in tqdm(feature_cols, desc="Probando características"):
+        groups_data = [df[df['ResearchGroup'] == g][feature].dropna() for g in ['CN', 'MCI', 'AD']]
+        if any(len(g) < 3 for g in groups_data): continue
+        
+        stat, p_value = kruskal(*groups_data)
+        dunn_results = posthoc_dunn(df, val_col=feature, group_col='ResearchGroup', p_adjust='holm') if p_value < 0.05 else None
+        
+        results.append({
+            'feature': feature,
+            'p_value': p_value,
+            'dunn_CN_vs_MCI': dunn_results.loc['CN', 'MCI'] if dunn_results is not None else 'N/A',
+            'dunn_CN_vs_AD': dunn_results.loc['CN', 'AD'] if dunn_results is not None else 'N/A',
+            'dunn_MCI_vs_AD': dunn_results.loc['MCI', 'AD'] if dunn_results is not None else 'N/A',
+        })
+    pd.DataFrame(results).sort_values('p_value').to_csv(save_dir / 'analisis_estadistico_caracteristicas.csv', index=False)
+    log.info(f"Resultados estadísticos guardados en {save_dir / 'analisis_estadistico_caracteristicas.csv'}")
 
-    features_scaled = StandardScaler().fit_transform(features)
+def plot_exploratory_feature_importance(df: pd.DataFrame, feature_cols: list, save_dir: Path):
+    log.info("Estimando importancia de características (Exploratorio, sobre todos los datos)...")
+    df_clean = df[['ResearchGroup'] + feature_cols].dropna()
+    X = df_clean[feature_cols]
+    y = df_clean['ResearchGroup']
     
-    pca = PCA().fit(features_scaled)
+    scaler = StandardScaler().fit(X)
+    X_scaled = scaler.transform(X)
     
-    plt.figure(figsize=(12, 7))
-    plt.plot(range(1, len(pca.explained_variance_ratio_) + 1),
-             np.cumsum(pca.explained_variance_ratio_), marker='o', linestyle='--')
-    plt.title('Varianza Acumulada Explicada por Componentes Principales')
-    plt.xlabel('Número de Componentes')
-    plt.ylabel('Varianza Acumulada Explicada')
-    plt.grid(True)
-    plt.axhline(y=0.9, color='r', linestyle=':', label='90% Varianza')
-    plt.ylim(0, 1.05)
-    plt.legend()
+    clf = RandomForestClassifier(n_estimators=100, random_state=42).fit(X_scaled, y)
     
-    plt.savefig(save_dir / 'pca_scree_plot_caracteristicas.png', dpi=200, bbox_inches='tight')
+    importance_df = pd.DataFrame({'feature': feature_cols, 'importance': clf.feature_importances_}) \
+        .sort_values('importance', ascending=False)
+    
+    plt.figure(figsize=(12, 10))
+    sns.barplot(x='importance', y='feature', data=importance_df.head(20), palette='viridis')
+    plt.title('Top 20 Características más Importantes (Exploratorio)')
+    plt.xlabel("Importancia (Reducción de Impureza Gini)")
+    plt.ylabel("Característica")
+    plt.tight_layout()
+    plt.savefig(save_dir / "importancia_caracteristicas_exploratorio.png", dpi=200)
+    plt.close()
+    importance_df.to_csv(save_dir / "importancia_caracteristicas_exploratorio.csv", index=False)
+
+
+# --- 4. VISUALIZACIÓN EN ESPACIO LATENTE (EXPLORATORIO) ---
+def plot_latent_space_projections(df: pd.DataFrame, feature_cols: List[str], save_dir: Path):
+    log.info("Generando proyecciones en espacio latente (PCA y UMAP)...")
+    df_clean = df[['ResearchGroup'] + feature_cols].dropna()
+    
+    X = df_clean[feature_cols]
+    y = df_clean['ResearchGroup']
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X_scaled)
+    
+    fig, ax = plt.subplots(1, 2, figsize=(16, 7))
+    sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], hue=y, ax=ax[0], style=y, s=80, hue_order=['CN', 'MCI', 'AD'])
+    ax[0].set_title(f'PCA (Varianza Explicada: {pca.explained_variance_ratio_.sum():.2%})')
+    ax[0].set_xlabel('Componente Principal 1')
+    ax[0].set_ylabel('Componente Principal 2')
+    ax[0].legend(title='Grupo')
+
+    reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42)
+    X_umap = reducer.fit_transform(X_scaled)
+    
+    sns.scatterplot(x=X_umap[:, 0], y=X_umap[:, 1], hue=y, ax=ax[1], style=y, s=80, hue_order=['CN', 'MCI', 'AD'])
+    ax[1].set_title('UMAP (n_neighbors=15, min_dist=0.1)')
+    ax[1].set_xlabel('Dimensión UMAP 1')
+    ax[1].set_ylabel('Dimensión UMAP 2')
+    ax[1].legend(title='Grupo')
+
+    plt.tight_layout()
+    plt.savefig(save_dir / 'proyecciones_latentes_pca_umap.png', dpi=200)
     plt.close()
 
 
-# --- Función Principal ---
-
-def parse_args():
-    """Parsea los argumentos de la línea de comandos."""
-    p = argparse.ArgumentParser(description="Análisis exploratorio de resultados del pipeline de conectividad.")
-    p.add_argument('--run', required=True, help="Nombre de la carpeta de la corrida a analizar (ej: connectivity_8ch_...).")
-    p.add_argument('--meta', default='SubjectsData_Schaefer400.csv', help="Nombre del archivo CSV con metadatos de los sujetos.")
-    p.add_argument('--samples', type=int, default=3, help="Número de sujetos por grupo para la galería de matrices.")
-    return p.parse_args()
-
-def main(args):
-    """Orquesta el análisis y la visualización."""
+# --- 5. EXPORTACIÓN DE DATOS CONSOLIDADOS ---
+def export_full_dataset(df: pd.DataFrame, feature_cols: list, run_path: Path):
+    """Guarda el DataFrame final y limpio para uso futuro."""
+    log.info("Exportando el conjunto de datos completo y limpio...")
     
-    run_data = find_and_load_interim_data(args.run, args.meta)
+    cols_to_keep = ['subject_id', 'ResearchGroup', 'Age', 'Sex', 'PTEDUCAT', 'MMSE'] + feature_cols
+    df_export = df[cols_to_keep].copy()
+    
+    save_path = run_path / "analisis_tesis_exploratorio" / "final_dataset_for_modeling.csv"
+    df_export.to_csv(save_path, index=False)
+    log.info(f"Conjunto de datos consolidado guardado en: {save_path}")
+
+
+# --- FUNCIÓN PRINCIPAL DE ORQUESTACIÓN ---
+def main():
+    parser = argparse.ArgumentParser(description="Análisis Exploratorio de Datos para Tesis.")
+    parser.add_argument('--run', required=True, help="Nombre de la carpeta de la corrida a analizar.")
+    parser.add_argument('--meta', default='SubjectsData_Schaefer400.csv', help="CSV con metadatos.")
+    args = parser.parse_args()
+
+    run_data = load_and_consolidate_data(args.run, args.meta)
     if run_data is None: return
-    df_processed, cfg, run_path = run_data
+    df, cfg, run_path = run_data
 
-    figs_dir = run_path / "figs_analisis_exploratorio"
-    figs_dir.mkdir(exist_ok=True)
+    analysis_dir = run_path / "analisis_tesis_exploratorio"
+    analysis_dir.mkdir(exist_ok=True)
     
-    log.info("Recalculando características escalares (Topología) para los sujetos procesados...")
-    all_features = []
-    # CORRECCIÓN: Usar la función tqdm directamente
-    for _, row in tqdm(df_processed.iterrows(), total=len(df_processed), desc="Recalculando features"):
-        features = {'subject_id': row['subject_id']}
-        tensor = np.load(row['tensor_path'], mmap_mode='r')
-        
-        if cfg.get('features', {}).get('graph_topology'):
-            base_matrix = tensor[0, :, :]
-            topo_features = feature_extractor.extract_graph_features(base_matrix, row['subject_id'])
-            if topo_features:
-                features.update(topo_features)
-        
-        all_features.append(features)
-        del tensor
-        gc.collect()
+    feature_cols = [c for c in df.columns if c.startswith(('topo_', 'hmm_')) and pd.api.types.is_numeric_dtype(df[c])]
+    feature_cols = [c for c in feature_cols if df[c].std(skipna=True) > 1e-6]
 
-    features_df = pd.DataFrame(all_features)
-    # Se mantienen las columnas originales y se unen las nuevas características
-    df_with_features = pd.merge(df_processed, features_df, on='subject_id', how='left')
-
-    # --- Ejecutar todos los análisis ---
-    plot_connectivity_gallery(df_with_features, cfg, figs_dir, args.samples)
-    plot_feature_distributions(df_with_features, figs_dir)
-    plot_feature_clustermap(df_with_features, figs_dir)
-    plot_pca_scree(df_with_features, figs_dir)
+    log.info("--- INICIANDO PIPELINE DE ANÁLISIS EXPLORATORIO ---")
     
-    log.info(f"¡Análisis completado! Revisa la nueva subcarpeta '{figs_dir.name}' dentro de tu directorio de ejecución.")
+    plot_group_connectome_analysis(df, cfg, analysis_dir)
+    plot_feature_distributions(df, feature_cols, analysis_dir)
+    plot_feature_clustermap(df, feature_cols, analysis_dir)
+    perform_statistical_tests(df, feature_cols, analysis_dir)
+    plot_exploratory_feature_importance(df, feature_cols, analysis_dir)
+    plot_latent_space_projections(df, feature_cols, analysis_dir)
+    export_full_dataset(df, feature_cols, run_path)
+    
+    log.info(f"--- ANÁLISIS EXPLORATORIO COMPLETO ---")
+    log.info(f"Todos los resultados se han guardado en: {analysis_dir}")
 
 if __name__ == '__main__':
-    args = parse_args()
-    main(args)
+    main()
