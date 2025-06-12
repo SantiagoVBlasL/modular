@@ -1,0 +1,31 @@
+# --- Archivo de Configuración: Experimento Final para Tesis ---
+# Descripción: Ejecución con 8 canales, β-VAE (beta=4), y CV estratificada.
+# Objetivo: Maximizar rendimiento combinando características latentes y escalares.
+
+# --- Rutas ---
+run_dir: './connectivity_features/connectivity_8ch_20250611_154317'
+output_dir: './results_exp_final_beta4_ld128'
+
+# --- Selección de Datos ---
+channels_to_use: [0, 1, 2, 3, 4, 5, 6, 7]
+
+# --- Hiperparámetros del VAE ---
+latent_dim: 512
+beta: 2.5
+dropout_rate: 0.15
+
+# --- Parámetros de Entrenamiento ---
+epochs: 450
+lr: 1e-4
+batch_size: 32
+weight_decay: 1e-5
+early_stopping: 45
+beta_cycles: 3
+
+# --- Validación Cruzada y Clasificador ---
+n_folds: 5
+classifier_types: ['rf', 'svm', 'logreg']
+stratify_on: ['ResearchGroup', 'Sex']
+
+# --- General ---
+seed: 42

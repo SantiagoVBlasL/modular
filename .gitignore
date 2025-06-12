@@ -1,11 +1,24 @@
 # Archivos de caché de Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Carpetas de entorno virtual
+venv/
+venv_fmri/
+.venv/
 
 # Carpetas de resultados de los pipelines
+# (Es buena práctica ignorar las carpetas que contienen datos generados)
 connectivity_features/
 qc_outputs_refactored_v1.0/
 debug_outputs/
+results_*/
+
+# --- ADICIONES SOLICITADAS ---
+# Carpetas con datos crudos o intermedios muy pesados
+ROISignalsAAL3/
 
 # Archivos de log y temporales
 *.log
@@ -14,4 +27,5 @@ ListOfErrorsWithData.txt
 # Archivos del sistema operativo y editores
 .DS_Store
 .vscode/
+.copilot/
 *.ipynb_checkpoints
