@@ -1,26 +1,30 @@
-# --- Archivo de Configuración: Experimento Final para Tesis ---
-# Descripción: Ejecución con 8 canales, β-VAE (beta=4), y CV estratificada.
-# Objetivo: Maximizar rendimiento combinando características latentes y escalares.
+# --- Archivo de Configuración: Experimento Optimizado para Tesis ---
+# Descripción: Ejecución con 8 canales, β-VAE (beta=2.5), y entrenamiento
+#              del VAE mejorado para obtener características latentes más ricas.
+# Objetivo: Maximizar el rendimiento del clasificador final.
 
-# --- Rutas ---
+# --- Rutas y Selección de Datos ---
 run_dir: './connectivity_features/connectivity_8ch_20250611_154317'
-output_dir: './results_exp_final_beta4_ld128'
-
-# --- Selección de Datos ---
-channels_to_use: [0, 1, 2, 3, 4, 5, 6, 7]
+output_dir: './results/exp_beta2.5_ld256_e300_adamw'
+channels_to_use: [0, 1, 2, 3, 4, 5, 6, 7] # Usar toda la información disponible
 
 # --- Hiperparámetros del VAE ---
-latent_dim: 512
-beta: 2.5
-dropout_rate: 0.15
+latent_dim: 512        # Aumentamos la capacidad vs 128
+beta: 1.5              # Un valor > 1 para un β-VAE, pero no tan agresivo como 4.0
+dropout_rate: 0.1    # Un dropout estándar
 
-# --- Parámetros de Entrenamiento ---
-epochs: 450
-lr: 1e-4
-batch_size: 32
-weight_decay: 1e-5
-early_stopping: 45
-beta_cycles: 3
+# --- Parámetros de Entrenamiento Avanzados ---
+epochs: 550            # Más épocas para asegurar la convergencia del VAE
+lr: 0.0001             # Un learning rate ligeramente más alto, común en AdamW
+batch_size: 32         # Un batch size más grande para estabilizar el gradiente
+weight_decay: 0.00001     # Regularización L2 fuerte, clave en AdamW
+early_stopping: 45     # Paciencia de 40 épocas antes de detener
+beta_cycles: 3         # Annealing más gradual de beta
+kl_start_epoch: 15     # Retrasa la regularización KLD para que el VAE aprenda a reconstruir primero
+optimizer: 'adamw'     # AdamW es a menudo superior a Adam, especialmente con weight_decay
+scheduler: 'cosine'    # Cosine annealing es un scheduler muy efectivo que a menudo supera a Plateau
+lr_warmup_epochs: 100   # Arranque suave del LR para evitar inestabilidad inicial
+clip_grad_norm: 1.0    # Previene la explosión de gradientes
 
 # --- Validación Cruzada y Clasificador ---
 n_folds: 5

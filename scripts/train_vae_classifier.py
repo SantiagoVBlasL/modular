@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-train_vae_classifier.py (Versión Tesis v3.0)
+train_vae_classifier.py (Versión Tesis v4.0 - Profesional)
 
 Script definitivo para entrenar y evaluar modelos híbridos de β-VAE y clasificadores,
 utilizando una validación cruzada anidada y estratificada.
-Este script combina la carga de datos modular del nuevo pipeline con el control
-exhaustivo de hiperparámetros y la flexibilidad experimental del código original.
-Ahora soporta archivos de configuración YAML para una gestión de experimentos profesional.
+Este script soporta archivos de configuración YAML para una gestión de experimentos
+profesional, reproducible y flexible, con control total sobre el entrenamiento.
 """
-from __future__ import annotations  # Para compatibilidad con Python 3.7+
+from __future__ import annotations  # Para compatibilidad con tipos de retorno en Python 3.7+
 import argparse
 import gc
 import logging
@@ -46,10 +45,10 @@ class ConvolutionalVAE(nn.Module):
 
         # Encoder
         self.encoder_conv = nn.Sequential(
-            nn.Conv2d(input_channels, 32, kernel_size=4, stride=2, padding=1), nn.ReLU(), nn.BatchNorm2d(32), nn.Dropout2d(p=dropout_rate),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1), nn.ReLU(), nn.BatchNorm2d(64), nn.Dropout2d(p=dropout_rate),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1), nn.ReLU(), nn.BatchNorm2d(128), nn.Dropout2d(p=dropout_rate),
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1), nn.ReLU(), nn.BatchNorm2d(256),
+            nn.Conv2d(input_channels, 32, 4, 2, 1), nn.ReLU(), nn.BatchNorm2d(32), nn.Dropout2d(p=dropout_rate),
+            nn.Conv2d(32, 64, 4, 2, 1), nn.ReLU(), nn.BatchNorm2d(64), nn.Dropout2d(p=dropout_rate),
+            nn.Conv2d(64, 128, 4, 2, 1), nn.ReLU(), nn.BatchNorm2d(128), nn.Dropout2d(p=dropout_rate),
+            nn.Conv2d(128, 256, 4, 2, 1), nn.ReLU(), nn.BatchNorm2d(256),
             nn.Flatten()
         )
         with torch.no_grad():
@@ -61,14 +60,13 @@ class ConvolutionalVAE(nn.Module):
         self.decoder_fc = nn.Linear(latent_dim, self.flattened_size)
         self.decoder_unflatten = nn.Unflatten(1, (256, 8, 8))
         self.decoder_conv = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1), nn.ReLU(), nn.BatchNorm2d(128),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1), nn.ReLU(), nn.BatchNorm2d(64),
-            nn.ConvTranspose2d(64, 32, kernel_size=5, stride=2, padding=2, output_padding=1), nn.ReLU(), nn.BatchNorm2d(32),
-            nn.ConvTranspose2d(32, input_channels, kernel_size=5, stride=2, padding=2, output_padding=1), nn.Tanh()
+            nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.ReLU(), nn.BatchNorm2d(128),
+            nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.ReLU(), nn.BatchNorm2d(64),
+            nn.ConvTranspose2d(64, 32, 5, 2, 2, output_padding=1), nn.ReLU(), nn.BatchNorm2d(32),
+            nn.ConvTranspose2d(32, input_channels, 5, 2, 2, output_padding=1), nn.Tanh()
         )
     def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar); eps = torch.randn_like(std)
-        return mu + eps * std
+        std = torch.exp(0.5 * logvar); eps = torch.randn_like(std); return mu + eps * std
     def encode(self, x):
         h = self.encoder_conv(x); return self.fc_mu(h), self.fc_logvar(h)
     def decode(self, z):
@@ -79,10 +77,13 @@ class ConvolutionalVAE(nn.Module):
             recon_x = nn.functional.interpolate(recon_x, size=(x.size(2), x.size(3)), mode='bilinear', align_corners=False)
         return recon_x, mu, logvar, z
 
-def get_cyclical_beta_schedule(current_epoch, total_epochs, beta_max, n_cycles):
+def get_cyclical_beta_schedule(current_epoch, total_epochs, beta_max, n_cycles, start_epoch):
+    if current_epoch < start_epoch: return 0.0
+    effective_epoch = current_epoch - start_epoch
+    effective_total = total_epochs - start_epoch
     if n_cycles <= 0: return beta_max
-    epoch_per_cycle = total_epochs / n_cycles
-    epoch_in_cycle = current_epoch % epoch_per_cycle
+    epoch_per_cycle = max(1, effective_total / n_cycles)
+    epoch_in_cycle = effective_epoch % epoch_per_cycle
     return beta_max * (epoch_in_cycle / epoch_per_cycle)
 
 def vae_loss_function(recon_x, x, mu, logvar, beta):
@@ -101,8 +102,7 @@ def load_full_dataset(data_dir: Path, channel_indices: list[int] | None) -> dict
             'features': np.load(data_dir / "cv_all_features_unscaled.npy"),
         }
         if channel_indices:
-            log.info(f"Seleccionando canales en los índices: {channel_indices}")
-            data['tensors'] = data['tensors'][:, channel_indices, :, :]
+            log.info(f"Seleccionando canales en los índices: {channel_indices}"); data['tensors'] = data['tensors'][:, channel_indices, :, :]
         return data
     except FileNotFoundError as e:
         log.error(f"Error: Archivo no encontrado. Ejecuta 'prepare_and_analyze_data.py' primero. Detalle: {e}")
@@ -110,36 +110,44 @@ def load_full_dataset(data_dir: Path, channel_indices: list[int] | None) -> dict
 
 def normalize_tensors_in_fold(train_tensors, test_tensors):
     n_channels = train_tensors.shape[1]
-    train_tensors_norm = np.zeros_like(train_tensors)
-    test_tensors_norm = np.zeros_like(test_tensors)
+    train_tensors_norm, test_tensors_norm = np.zeros_like(train_tensors), np.zeros_like(test_tensors)
     for i in range(n_channels):
         mean, std = np.mean(train_tensors[:, i]), np.std(train_tensors[:, i])
         if std < 1e-6: std = 1.0
-        train_tensors_norm[:, i] = (train_tensors[:, i] - mean) / std
-        test_tensors_norm[:, i] = (test_tensors[:, i] - mean) / std
+        train_tensors_norm[:, i] = (train_tensors[:, i] - mean) / std; test_tensors_norm[:, i] = (test_tensors[:, i] - mean) / std
     log.info("Tensores de entrada normalizados (z-score por canal) dentro del fold.")
     return train_tensors_norm, test_tensors_norm
 
 def train_vae_for_fold(train_tensors, val_tensors, args, fold_idx_str, device):
-    log.info(f"Iniciando entrenamiento del β-VAE en {len(train_tensors)} muestras de entrenamiento, {len(val_tensors)} de validación...")
+    log.info(f"Iniciando entrenamiento del β-VAE en {len(train_tensors)} muestras, validando con {len(val_tensors)}.")
     train_loader = DataLoader(TensorDataset(torch.from_numpy(train_tensors).float()), batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader = DataLoader(TensorDataset(torch.from_numpy(val_tensors).float()), batch_size=args.batch_size) if val_tensors is not None and len(val_tensors) > 0 else None
-    model = ConvolutionalVAE(
-        input_channels=train_tensors.shape[1], latent_dim=args.latent_dim,
-        image_size=train_tensors.shape[2], dropout_rate=args.dropout_rate
-    ).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=15, factor=0.5, verbose=False) if val_loader else None
+    val_loader = DataLoader(TensorDataset(torch.from_numpy(val_tensors).float()), batch_size=args.batch_size) if len(val_tensors) > 0 else None
     
+    model = ConvolutionalVAE(input_channels=train_tensors.shape[1], latent_dim=args.latent_dim, image_size=train_tensors.shape[2], dropout_rate=args.dropout_rate).to(device)
+    
+    if args.optimizer == 'adamw': optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    else: optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        
+    if val_loader and args.scheduler == 'plateau': scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=15, factor=0.5, verbose=False)
+    elif args.scheduler == 'cosine': scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs - args.lr_warmup_epochs)
+    else: scheduler = None
+
     best_val_loss, epochs_no_improve, best_model_state = float('inf'), 0, None
     for epoch in range(1, args.epochs + 1):
+        if epoch <= args.lr_warmup_epochs:
+            warmup_factor = epoch / max(1, args.lr_warmup_epochs)
+            for g in optimizer.param_groups: g['lr'] = args.lr * warmup_factor
+        
         model.train()
-        current_beta = get_cyclical_beta_schedule(epoch, args.epochs, args.beta, args.beta_cycles)
+        current_beta = get_cyclical_beta_schedule(epoch, args.epochs, args.beta, args.beta_cycles, args.kl_start_epoch)
         for data_batch, in train_loader:
             data_batch = data_batch.to(device); optimizer.zero_grad()
             recon_batch, mu, logvar, _ = model(data_batch)
             loss = vae_loss_function(recon_batch, data_batch, mu, logvar, current_beta)
-            loss.backward(); optimizer.step()
+            loss.backward()
+            if args.clip_grad_norm: nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+            optimizer.step()
+        
         if val_loader:
             model.eval(); val_loss = 0
             with torch.no_grad():
@@ -147,14 +155,15 @@ def train_vae_for_fold(train_tensors, val_tensors, args, fold_idx_str, device):
                     recon, mu, logvar, _ = model(val_data.to(device))
                     val_loss += vae_loss_function(recon, val_data.to(device), mu, logvar, current_beta).item() * val_data.size(0)
             avg_val_loss = val_loss / len(val_loader.dataset)
-            if scheduler: scheduler.step(avg_val_loss)
+            if scheduler and epoch > args.lr_warmup_epochs: scheduler.step(avg_val_loss)
             if avg_val_loss < best_val_loss:
                 best_val_loss, epochs_no_improve, best_model_state = avg_val_loss, 0, copy.deepcopy(model.state_dict())
             else:
                 epochs_no_improve += 1
-            if epoch % 20 == 0: log.info(f"{fold_idx_str} | Epoch: {epoch} | Val Loss: {avg_val_loss:.4f} | Beta: {current_beta:.3f}")
+            if epoch % 20 == 0: log.info(f"{fold_idx_str} | Epoch: {epoch} | Val Loss: {avg_val_loss:.4f} | Beta: {current_beta:.3f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
             if args.early_stopping > 0 and epochs_no_improve >= args.early_stopping:
                 log.info(f"Early stopping en epoch {epoch}. Mejor Val Loss: {best_val_loss:.4f}"); break
+    
     if best_model_state: model.load_state_dict(best_model_state)
     return model
 
@@ -170,7 +179,7 @@ def get_classifier_and_grid(classifier_type, seed):
                {'C': [0.1, 1, 10, 100], 'gamma': [0.0001, 0.001, 0.01, 'scale'], 'kernel': ['rbf']}
     elif classifier_type == 'rf':
         return RandomForestClassifier(random_state=seed, class_weight='balanced', n_jobs=-1), \
-               {'n_estimators': [100, 200, 300], 'max_depth': [None, 10, 30], 'min_samples_split': [2, 5, 10]}
+               {'n_estimators': [100, 200, 300], 'max_depth': [10, 20, None], 'min_samples_split': [2, 5, 10]}
     elif classifier_type == 'logreg':
         return LogisticRegression(random_state=seed, class_weight='balanced', solver='liblinear', max_iter=1000), \
                {'C': [0.001, 0.01, 0.1, 1, 10]}
@@ -179,7 +188,7 @@ def get_classifier_and_grid(classifier_type, seed):
 def main(args: argparse.Namespace):
     output_dir = Path(args.output_dir); output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    log.info(f"Usando dispositivo: {device}")
+    log.info(f"Configuración de la ejecución: {vars(args)}")
     
     dataset = load_full_dataset(Path(args.run_dir) / "data_for_cv", args.channels_to_use)
     if not dataset: return
@@ -187,21 +196,16 @@ def main(args: argparse.Namespace):
     key_df, all_tensors, all_features = dataset['key_df'], dataset['tensors'], dataset['features']
     key_df['strat_key'] = key_df[args.stratify_on].apply(lambda x: '_'.join(x.astype(str)), axis=1)
     
-    class_groups = ['CN', 'MCI', 'AD']
-    classification_df = key_df[key_df['ResearchGroup'].isin(class_groups)].copy()
-    y_labels = classification_df['ResearchGroup'].astype('category').cat.codes.values
+    y_labels = key_df['ResearchGroup'].astype('category').cat.codes.values
     
     skf = StratifiedKFold(n_splits=args.n_folds, shuffle=True, random_state=args.seed)
     all_final_metrics = []
 
-    for fold_idx, (train_idx, test_idx) in enumerate(skf.split(classification_df, classification_df['strat_key'])):
+    for fold_idx, (train_idx, test_idx) in enumerate(skf.split(key_df, key_df['strat_key'])):
         log.info(f"--- Iniciando Fold {fold_idx + 1}/{args.n_folds} ---")
         
-        original_train_idx = classification_df.index[train_idx]
-        original_test_idx = classification_df.index[test_idx]
-        
-        X_train_tensors, X_test_tensors = all_tensors[original_train_idx], all_tensors[original_test_idx]
-        X_train_features, X_test_features = all_features[original_train_idx], all_features[original_test_idx]
+        X_train_tensors, X_test_tensors = all_tensors[train_idx], all_tensors[test_idx]
+        X_train_features, X_test_features = all_features[train_idx], all_features[test_idx]
         y_train, y_test = y_labels[train_idx], y_labels[test_idx]
 
         X_train_tensors_norm, X_test_tensors_norm = normalize_tensors_in_fold(X_train_tensors, X_test_tensors)
@@ -210,8 +214,7 @@ def main(args: argparse.Namespace):
             X_train_tensors_norm, y_train, test_size=0.15, stratify=y_train, random_state=args.seed)
         
         scaler = StandardScaler().fit(X_train_features)
-        X_train_features_scaled = scaler.transform(X_train_features)
-        X_test_features_scaled = scaler.transform(X_test_features)
+        X_train_features_scaled, X_test_features_scaled = scaler.transform(X_train_features), scaler.transform(X_test_features)
         
         vae_model = train_vae_for_fold(vae_train_tensors, vae_val_tensors, args, f"Fold {fold_idx + 1}", device)
         
@@ -243,25 +246,24 @@ def main(args: argparse.Namespace):
     log.info(f"\nResultados detallados guardados en: {output_dir / 'final_performance_metrics.csv'}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Entrenamiento de β-VAE + Clasificador Híbrido con CV y HP-Tuning.")
-    
-    # --- Lógica de Carga de Configuración ---
-    config_parser = argparse.ArgumentParser(description='Config Parser', add_help=False)
-    config_parser.add_argument('--config', type=str, default=None, help='Ruta a un archivo de configuración YAML.')
-    config_args, remaining_argv = config_parser.parse_known_args()
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--config', type=str, help='Ruta a un archivo de configuración YAML.')
+    config_args, remaining_argv = parser.parse_known_args()
     
     defaults = {}
     if config_args.config:
         with open(config_args.config, 'r') as f:
             defaults = yaml.safe_load(f)
 
-    # --- Parser Principal ---
-    parser = argparse.ArgumentParser(parents=[config_parser])
-    
+    parser = argparse.ArgumentParser(
+        parents=[parser],
+        description="Entrenamiento de β-VAE + Clasificador Híbrido con CV y HP-Tuning.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     group_data = parser.add_argument_group('Data and Paths')
     group_data.add_argument('--run_dir', type=str, help="Ruta a la carpeta de la corrida que contiene 'data_for_cv'.")
     group_data.add_argument('--output_dir', type=str, help="Directorio para guardar resultados.")
-    group_data.add_argument('--channels_to_use', type=int, nargs='*', help="Índices de canales a usar (ej: 0 1 3).")
+    group_data.add_argument('--channels_to_use', type=int, nargs='*')
     
     group_vae = parser.add_argument_group('VAE Hyperparameters')
     group_vae.add_argument('--latent_dim', type=int)
@@ -273,8 +275,13 @@ if __name__ == "__main__":
     group_train.add_argument('--lr', type=float)
     group_train.add_argument('--batch_size', type=int)
     group_train.add_argument('--weight_decay', type=float)
-    group_train.add_argument('--early_stopping', type=int, help="Paciencia para early stopping. 0 para deshabilitar.")
-    group_train.add_argument('--beta_cycles', type=int, help="Ciclos para annealing de beta.")
+    group_train.add_argument('--early_stopping', type=int)
+    group_train.add_argument('--beta_cycles', type=int)
+    group_train.add_argument('--kl_start_epoch', type=int)
+    group_train.add_argument('--optimizer', type=str, choices=['adam', 'adamw'])
+    group_train.add_argument('--scheduler', type=str, choices=['plateau', 'cosine', 'none'])
+    group_train.add_argument('--lr_warmup_epochs', type=int)
+    group_train.add_argument('--clip_grad_norm', type=float)
     
     group_cv = parser.add_argument_group('Cross-Validation & Classifier')
     group_cv.add_argument('--n_folds', type=int)
