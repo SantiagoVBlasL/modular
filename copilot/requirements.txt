@@ -1,8 +1,0 @@
-numpy>=1.20.0
-pandas>=1.3.0
-scipy>=1.7.0
-scikit-learn>=1.0.0
-PyYAML>=6.0
-matplotlib>=3.5.0
-nibabel>=3.2.0  # Para trabajar con imágenes de neuroimagen
-nilearn>=0.8.0  # Herramientas específicas para neuroimagen
