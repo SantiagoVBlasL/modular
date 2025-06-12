@@ -89,24 +89,53 @@ def tangent_space(ts: np.ndarray, subject_id: str, **kwargs) -> Optional[np.ndar
         return None
     
 # --- NUEVOS CANALES ---
-
 def mutual_info_full(ts: np.ndarray, cfg: dict, subject_id: str, **kwargs) -> Optional[np.ndarray]:
-    """Canal de Información Mutua (simetrizada)."""
-    if not SKLEARN_AVAILABLE: return np.zeros((ts.shape[1], ts.shape[1]))
+    """Canal de Información Mutua (simetrizada) - Versión Robusta."""
+    if not SKLEARN_AVAILABLE:
+        return np.zeros((ts.shape[1], ts.shape[1]))
+    
     log.debug(f"Sujeto {subject_id}: Calculando Información Mutua...")
     try:
         params = cfg.get('parameters', {}).get('mutual_info', {'n_bins': 8})
-        ranks = np.argsort(np.argsort(ts, axis=0), axis=0)
-        disc = np.floor((ranks / float(ts.shape[0])) * params['n_bins']).astype(int)
         n_rois = ts.shape[1]
         mi_mat = np.zeros((n_rois, n_rois), dtype=np.float32)
+
+        # --- INICIO DE LA CORRECCIÓN ---
+        # Identificar columnas con varianza casi nula
+        std_devs = np.std(ts, axis=0)
+        constant_cols_mask = std_devs < 1e-9
+        
+        # Crear una copia de los datos para no modificar el original
+        ts_to_process = ts.copy()
+        
+        # Si hay columnas constantes, no se pueden usar en MI. Las reemplazaremos
+        # con ruido gaussiano de baja amplitud para evitar errores en la discretización
+        # y el cálculo, sabiendo que su MI con otras señales será casi cero.
+        if np.any(constant_cols_mask):
+            log.warning(f"Sujeto {subject_id}: Se encontraron {np.sum(constant_cols_mask)} ROIs de varianza nula. Su MI será ~0.")
+            for i in np.where(constant_cols_mask)[0]:
+                ts_to_process[:, i] = np.random.normal(0, 1e-6, size=ts.shape[0])
+        # --- FIN DE LA CORRECCIÓN ---
+
+        # Usar los datos corregidos para el cálculo
+        ranks = np.argsort(np.argsort(ts_to_process, axis=0), axis=0)
+        disc = np.floor((ranks / float(ts.shape[0])) * params['n_bins']).astype(int)
+        
         for i in range(n_rois):
+            # Si la columna original era constante, su MI es 0, no hay necesidad de calcular
+            if constant_cols_mask[i]:
+                mi_mat[i, :] = 0.0
+                mi_mat[:, i] = 0.0
+                continue
             mi_mat[i, :] = mutual_info_regression(disc, disc[:, i], discrete_features=True)
+            
         return (mi_mat + mi_mat.T) / 2.0
+        
     except Exception as e:
         log.error(f"Sujeto {subject_id}: Fallo Mutual Information - {e}")
         return None
-
+    
+    
 def distance_corr_full(ts: np.ndarray, subject_id: str, **kwargs) -> Optional[np.ndarray]:
     """Canal de Distance Correlation."""
     if not DCOR_AVAILABLE: return np.zeros((ts.shape[1], ts.shape[1]))

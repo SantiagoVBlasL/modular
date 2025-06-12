@@ -59,7 +59,7 @@ def extract_hmm_features(ts: np.ndarray, cfg: dict, subject_id: str) -> Dict[str
 def extract_graph_features(matrix: np.ndarray, subject_id: str) -> Dict[str, Any] | None:
     """
     Calcula un conjunto extendido de métricas de topología de grafos 
-    sobre una matriz de conectividad.
+    sobre una matriz de conectividad de forma numéricamente estable.
     """
     if not BCT_AVAILABLE:
         log.warning("Librería 'bctpy' no encontrada. Omitiendo características de topología.")
@@ -68,67 +68,58 @@ def extract_graph_features(matrix: np.ndarray, subject_id: str) -> Dict[str, Any
     log.debug(f"Sujeto {subject_id}: Extrayendo características de topología extendidas...")
     try:
         # Preprocesamiento de la matriz para asegurar pesos positivos (0-1)
-        # y diagonal de ceros, requerido por muchas funciones de bctpy.
+        # y diagonal de ceros.
         matrix_norm = matrix.copy()
+        # Manejar posibles NaNs o Infs que vengan de cálculos previos
+        matrix_norm[~np.isfinite(matrix_norm)] = 0
+        
         if np.any(matrix_norm < 0):
-             matrix_norm = (matrix_norm - np.min(matrix_norm)) / (np.max(matrix_norm) - np.min(matrix_norm))
+            min_val, max_val = np.min(matrix_norm), np.max(matrix_norm)
+            if (max_val - min_val) > 0:
+                matrix_norm = (matrix_norm - min_val) / (max_val - min_val)
+            else: # Matriz constante
+                matrix_norm.fill(0)
+                
         np.fill_diagonal(matrix_norm, 0)
 
-        # --- Métricas Globales Existentes ---
-        charpath_results = bct.charpath(matrix_norm)
+        # --- INICIO DE LA CORRECCIÓN PARA ESTABILIDAD NUMÉRICA ---
+        # `charpath` y `betweenness_wei` (a través de `weight_conversion`) calculan inversas
+        # de los pesos (1/W). Para evitar divisiones por cero si un peso W es 0,
+        # creamos una matriz de distancia segura (donde distancia = 1/peso).
+        
+        # En lugar de añadir un epsilon, el método robusto es manejar los infinitos después.
+        with np.errstate(divide='ignore'): # Suprimir la advertencia de división por cero aquí
+            dist_matrix = bct.weight_conversion(matrix_norm, 'lengths')
+        
+        # Reemplazar los infinitos (resultado de 1/0) con un valor muy grande pero finito.
+        # Esto preserva la topología (un camino de peso cero es una distancia infinita)
+        # sin causar problemas numéricos en los algoritmos subsiguientes.
+        if np.isinf(dist_matrix).any():
+            max_dist = np.max(dist_matrix[np.isfinite(dist_matrix)]) if np.any(np.isfinite(dist_matrix)) else 1
+            dist_matrix[np.isinf(dist_matrix)] = max_dist * 10 # Un valor representativo de "muy lejos"
+        # --- FIN DE LA CORRECCIÓN ---
+
+
+        # --- Cálculo de Métricas ---
+
+        # Métricas que usan la matriz de DISTANCIA segura
+        charpath_results = bct.charpath(dist_matrix)
         char_path = charpath_results[0]
         global_efficiency = charpath_results[1]
-
-        modularity_louvain, _ = bct.modularity_und(matrix_norm)
-        
-        # --- NUEVAS MÉTRICAS ---
-
-        # 1. Asortatividad: Mide la preferencia de los nodos a conectarse con otros de grado similar.
-        assortativity = bct.assortativity_wei(matrix_norm, flag=0)
-
-        # 2. Eficiencia Local: Promedio de la eficiencia de las subredes de cada nodo.
-        #    Indica qué tan tolerante es la red a fallos a nivel local.
-        # --- 2. Eficiencia local ------------------------------------------
-        try:
-            # API 0.6: devuelve solo array de Eloc
-            local_efficiencies = bct.efficiency_wei(matrix_norm, local=True)
-        except TypeError:
-            # API 0.5: devuelve (Eglob, Eloc) incluso con local=True
-            _, local_efficiencies = bct.efficiency_wei(matrix_norm, local=True)
-        except ValueError:
-            # API 0.5 sin keyword local → devuelve (Eglob, Eloc)
-            _, local_efficiencies = bct.efficiency_wei(matrix_norm)
-
-        mean_local_efficiency = float(np.mean(local_efficiencies))
-
-
-
-        # 3. Medidas Nodales (resumidas con media y desviación estándar)
-        
-        # Grado/Fuerza (Degree/Strength): Suma de los pesos de las conexiones de cada nodo.
-        strengths = bct.strengths_und(matrix_norm)
-        
-        # Centralidad de Intermediación (Betweenness Centrality): Mide la influencia de un nodo sobre el flujo
-        # de información entre otros nodos en la red.
-        # NOTA: bct.betweenness_wei espera una matriz de longitud (distancia), no de peso.
-        dist_matrix = bct.weight_conversion(matrix_norm, 'lengths')
         betweenness_centrality = bct.betweenness_wei(dist_matrix)
 
-        # Coeficiente de Clustering: Mide la tendencia de los nodos a formar clústeres.
+        # Métricas que usan la matriz de PESO original (normalizada)
+        modularity_louvain, _ = bct.modularity_und(matrix_norm)
+        assortativity = bct.assortativity_wei(matrix_norm, flag=0)
+        strengths = bct.strengths_und(matrix_norm)
         clustering_coeffs = bct.clustering_coef_wu(matrix_norm)
 
         # Devolvemos el diccionario con todas las métricas
         return {
-            # Originales
             'topo_global_efficiency': global_efficiency,
             'topo_modularity': modularity_louvain,
             'topo_char_path_length': char_path,
-            
-            # Nuevas
             'topo_assortativity': assortativity,
-            'topo_mean_local_efficiency': mean_local_efficiency,
-            
-            # Resúmenes de Métricas Nodales
             'topo_mean_clustering_coef': np.mean(clustering_coeffs),
             'topo_std_clustering_coef': np.std(clustering_coeffs),
             'topo_mean_strength': np.mean(strengths),
