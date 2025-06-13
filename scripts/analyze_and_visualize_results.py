@@ -12,14 +12,19 @@ Funcionalidades Clave:
     - Calcula y grafica las matrices de conectividad PROMEDIO por grupo (CN, MCI, AD).
     - Calcula y grafica las matrices de DIFERENCIA (ej. AD - CN) con escalas de
       color optimizadas por canal para resaltar alteraciones.
-2.  Análisis Estadístico y de Características:
+2.  Análisis de Distribución de Datos por Canal:
+    - Genera gráficos de densidad (KDE) para visualizar y comparar la distribución
+      de los valores de conectividad para los grupos CN y AD en cada canal. Esto
+      ayuda a entender el rango y la centralidad de los datos, informando decisiones
+      como la elección de funciones de activación en modelos neuronales.
+3.  Análisis Estadístico y de Características:
     - Realiza tests de Kruskal-Wallis para comparar características entre grupos.
     - Estima la importancia de características de forma exploratoria con RandomForest.
-3.  Análisis Exploratorio y Visualización:
+4.  Análisis Exploratorio y Visualización:
     - Genera un clustermap de correlación para entender la estructura de las características.
     - Muestra la distribución de cada característica por grupo mediante violin plots.
     - Proyecta los datos en 2D usando PCA y UMAP para visualizar la separabilidad de los grupos.
-4.  Exportación de Datos Consolidados:
+5.  Exportación de Datos Consolidados:
     - Guarda un único archivo CSV con todos los sujetos, sus características procesadas y
       metadatos relevantes, sirviendo como un "datasheet" final para la etapa de modelado.
 """
@@ -91,19 +96,17 @@ def load_and_consolidate_data(run_dir_name: str, meta_file: str) -> Optional[Tup
 
 # --- 2. ANÁLISIS EXPLORATORIO Y VISUALIZACIÓN ---
 
-def plot_group_connectome_analysis(df: pd.DataFrame, cfg: dict, save_dir: Path):
+def plot_group_connectome_analysis(df: pd.DataFrame, cfg: dict, save_dir: Path, tensors_cache: Dict[str, np.ndarray]):
     """Calcula y grafica las matrices promedio y de diferencia entre grupos."""
     log.info("Análisis de conectomas por grupo (promedios y diferencias)...")
     groups = ['CN', 'MCI', 'AD']
     channel_names = [name for name, enabled in cfg.get('channels', {}).items() if enabled]
     n_channels = len(channel_names)
     
-    tensors = {row['subject_id']: np.load(row['tensor_path']) for _, row in df.iterrows()}
-    
     group_means = {}
     for group in groups:
         subject_ids = df[df['ResearchGroup'] == group]['subject_id']
-        group_tensors = [tensors[sid] for sid in subject_ids if sid in tensors]
+        group_tensors = [tensors_cache[sid] for sid in subject_ids if sid in tensors_cache]
         if group_tensors:
             group_means[group] = np.mean(np.stack(group_tensors), axis=0)
 
@@ -121,7 +124,6 @@ def plot_group_connectome_analysis(df: pd.DataFrame, cfg: dict, save_dir: Path):
     plt.savefig(save_dir / 'connectomas_promedio_por_grupo.png', dpi=200, bbox_inches='tight')
     plt.close(fig)
 
-    # --- CORRECCIÓN DE VISUALIZACIÓN ---
     # Graficar matrices de diferencia con escala de color individual
     if 'AD' in group_means and 'CN' in group_means:
         fig, axes = plt.subplots(1, n_channels, figsize=(n_channels * 5, 4.5), squeeze=False, constrained_layout=True)
@@ -131,19 +133,63 @@ def plot_group_connectome_analysis(df: pd.DataFrame, cfg: dict, save_dir: Path):
         for i, ch_name in enumerate(channel_names):
             ax = axes[0, i]
             diff_matrix = diff_tensor[i, :, :]
-            # Calcular límite de color simétrico para CADA canal
-            vmax = np.percentile(np.abs(diff_matrix), 99) # Usar percentil 99 para robustez a outliers
+            vmax = np.percentile(np.abs(diff_matrix), 99) 
             if vmax > 0:
                 im = ax.imshow(diff_matrix, cmap='coolwarm', vmin=-vmax, vmax=vmax, interpolation='none')
                 fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            else: # Si no hay diferencia, mostrar matriz gris
+            else: 
                 ax.imshow(diff_matrix, cmap='coolwarm', vmin=-1, vmax=1)
             ax.set_title(ch_name.replace("_", " ").title())
 
         plt.savefig(save_dir / 'connectomas_diferencia_AD-CN.png', dpi=200, bbox_inches='tight')
         plt.close(fig)
 
-    del tensors; gc.collect()
+def plot_channel_data_distributions(df: pd.DataFrame, cfg: dict, save_dir: Path, tensors_cache: Dict[str, np.ndarray]):
+    """
+    Genera y guarda gráficos de densidad para visualizar la distribución de los
+    valores de conectividad para cada canal, comparando los grupos CN y AD.
+    """
+    log.info("Generando gráficos de distribución de datos por canal (CN vs AD)...")
+    
+    df_plot = df[df['ResearchGroup'].isin(['CN', 'AD'])].copy()
+    channel_names = [name for name, enabled in cfg.get('channels', {}).items() if enabled]
+    all_values = []
+
+    for ch_idx, ch_name in enumerate(channel_names):
+        for group in ['CN', 'AD']:
+            subject_ids = df_plot[df_plot['ResearchGroup'] == group]['subject_id']
+            group_tensors = [tensors_cache[sid] for sid in subject_ids if sid in tensors_cache]
+            
+            if not group_tensors:
+                continue
+
+            # Extraer la matriz del canal y aplanar los valores del triángulo superior
+            off_diag_vals = np.concatenate([
+                tensor[ch_idx, :, :][np.triu_indices(tensor.shape[1], k=1)] 
+                for tensor in group_tensors
+            ])
+            
+            all_values.append(pd.DataFrame({'value': off_diag_vals, 'channel': ch_name, 'group': group}))
+
+    if not all_values:
+        log.warning("No se encontraron datos para graficar las distribuciones de los canales.")
+        return
+
+    plot_df = pd.concat(all_values, ignore_index=True)
+
+    # Crear el gráfico FacetGrid
+    g = sns.FacetGrid(plot_df, col="channel", hue="group", col_wrap=min(3, len(channel_names)), 
+                      sharex=False, sharey=False, palette={'CN': 'blue', 'AD': 'red'})
+    g.map(sns.kdeplot, "value", fill=True, alpha=0.6, cut=0)
+    g.add_legend()
+    g.fig.suptitle('Distribución de Valores de Conectividad por Canal (CN vs AD)', y=1.03, fontsize=16)
+    g.set_axis_labels("Valor de Conectividad", "Densidad")
+    g.set_titles("{col_name}")
+    
+    plot_path = save_dir / 'distribucion_datos_por_canal.png'
+    plt.savefig(plot_path, dpi=200, bbox_inches='tight')
+    plt.close(g.fig)
+    log.info(f"Gráfico de distribución de datos por canal guardado en: {plot_path}")
 
 def plot_feature_distributions(df: pd.DataFrame, feature_cols: list, save_dir: Path):
     log.info("Generando gráficos de distribución de características (Violin Plots)...")
@@ -282,14 +328,28 @@ def main():
     feature_cols = [c for c in feature_cols if df[c].std(skipna=True) > 1e-6]
 
     log.info("--- INICIANDO PIPELINE DE ANÁLISIS EXPLORATORIO ---")
+
+    # Crear un caché de tensores para evitar cargarlos múltiples veces
+    log.info("Creando caché de tensores en memoria para acelerar el análisis...")
+    tensors_cache = {
+        row['subject_id']: np.load(row['tensor_path']) 
+        for _, row in tqdm(df.iterrows(), total=len(df)) 
+        if pd.notna(row['tensor_path'])
+    }
     
-    plot_group_connectome_analysis(df, cfg, analysis_dir)
+    # Ejecutar todos los análisis pasando el caché de tensores
+    plot_group_connectome_analysis(df, cfg, analysis_dir, tensors_cache)
+    plot_channel_data_distributions(df, cfg, analysis_dir, tensors_cache) # <-- Nueva función
     plot_feature_distributions(df, feature_cols, analysis_dir)
     plot_feature_clustermap(df, feature_cols, analysis_dir)
     perform_statistical_tests(df, feature_cols, analysis_dir)
     plot_exploratory_feature_importance(df, feature_cols, analysis_dir)
     plot_latent_space_projections(df, feature_cols, analysis_dir)
     export_full_dataset(df, feature_cols, run_path)
+    
+    # Limpiar caché
+    del tensors_cache
+    gc.collect()
     
     log.info(f"--- ANÁLISIS EXPLORATORIO COMPLETO ---")
     log.info(f"Todos los resultados se han guardado en: {analysis_dir}")

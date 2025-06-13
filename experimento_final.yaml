@@ -1,53 +1,50 @@
-# Archivo de Configuración: Experimento Tesis v5.0 (Arquitectura Modular)
+# Archivo de Configuración: Replicando el experimento de 'wed_night.py'
 # --------------------------------------------------------------------
-# Descripción: Ejecución con arquitectura de VAE configurable, incluyendo
-#              capas convolucionales y lineales definidas por el usuario.
+# Descripción: Esta configuración busca replicar los resultados de la ejecución anterior
+#              ajustando los parámetros a los utilizados en el script v1.5.1.
 
 # --- Rutas y Selección de Datos ---
-run_dir: './connectivity_features/connectivity_8ch_20250611_154317'
-output_dir: './results/exp_modular_v5'
-# Canales seleccionados según el ranking de información mutua.
-# Puedes ajustar esto basado en tus análisis.
-channels_to_use: [0, 2, 3, 4, 5, 7]
+# ATENCIÓN: Debes reemplazar 'run_dir' con la ruta correcta a los datos pre-procesados
+# por 'prepare_and_analyze_data.py' en tu nuevo pipeline.
+run_dir: './connectivity_features/connectivity_8ch_20250611_154317' 
+output_dir: './results/REPLICA_wed_night'
+channels_to_use: [1, 2, 3] # Equivalente a --channels_to_use 1 2 3
 
-# --- Arquitectura del VAE (NUEVA SECCIÓN MODULAR) ---
+# --- Arquitectura del VAE (Modular) ---
+# Coincide con los parámetros de la ejecución anterior
 latent_dim: 512
 num_conv_layers: 4
-decoder_type: 'convtranspose' # 'convtranspose' o 'upsample_conv'
-# Canales de salida para cada capa convolucional del encoder
-vae_conv_channels: [32, 64, 128, 256]
-# Tamaños de kernel para cada capa convolucional del encoder
+decoder_type: 'convtranspose'
+# La arquitectura de canales convolucionales, kernels, etc., está ahora
+# codificada en el modelo, pero estos parámetros la controlan.
+vae_conv_channels: [32, 64, 128, 256] 
 vae_kernel_sizes: [7, 5, 5, 3]
-# Paddings para cada capa
 vae_paddings: [1, 1, 1, 1]
-# Strides para cada capa
 vae_strides: [2, 2, 2, 2]
-# Dimensión de la capa lineal intermedia (0 para no usarla)
-intermediate_fc_dim: 2048
-# Usar LayerNorm en las capas lineales (muy recomendado)
+intermediate_fc_dim: 1024
 use_layernorm_fc: true
-# Función de activación final del decoder
 final_activation: 'tanh'
 
 # --- Parámetros de Entrenamiento ---
-beta: 1.5
+# Coincide con los parámetros de la ejecución anterior
+beta: 1.0 # Equivalente a --beta_vae
 dropout_rate: 0.2
 epochs: 550
-lr: 0.0001
-batch_size: 32
-weight_decay: 0.00001
-optimizer: 'adamw'
-scheduler: 'cosine'
-lr_warmup_epochs: 100
-beta_cycles: 3
-kl_start_epoch: 15
-early_stopping: 55
-clip_grad_norm: 1.0
+lr: 0.0001 # Equivalente a --lr_vae
+batch_size: 64
+weight_decay: 0.00001 # Equivalente a --weight_decay_vae
+optimizer: 'adamw' # El nuevo script usa AdamW por defecto, puedes cambiarlo si es necesario
+scheduler: 'cosine' # El nuevo script usa Coseno, el anterior usaba ReduceLROnPlateau
+lr_warmup_epochs: 50 # Puedes ajustar este valor si lo deseas
+beta_cycles: 2 # Equivalente a --cyclical_beta_n_cycles
+kl_start_epoch: 0 # El equivalente más cercano al schedule anterior
+early_stopping: 50
+clip_grad_norm: 1.0 # Un valor por defecto robusto
 
 # --- Validación Cruzada y Clasificador ---
 n_folds: 5
-# Ahora con más opciones de clasificadores
-classifier_types: ['rf', 'svm', 'logreg', 'gb', 'mlp']
+# El nuevo script soporta 'lgbm', pero mantenemos los originales para replicar
+classifier_types: ['rf', 'gb', 'svm', 'logreg', 'mlp'] 
 stratify_on: ['ResearchGroup', 'Sex']
 
 # --- General ---

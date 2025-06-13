@@ -81,7 +81,7 @@ def load_and_consolidate_data(run_dir_name: str, meta_file: str) -> Optional[Tup
 
     return merged_df, run_path, cfg
 
-# --- NUEVA SECCIÓN: Análisis de Canales por Teoría de la Información ---
+# --- Análisis de Canales por Teoría de la Información ---
 
 def rank_channels_by_information_gain(df: pd.DataFrame, cfg: dict, save_dir: Path):
     """
@@ -104,25 +104,20 @@ def rank_channels_by_information_gain(df: pd.DataFrame, cfg: dict, save_dir: Pat
 
     for i, ch_name in enumerate(tqdm(channel_names, desc="Analizando Canales")):
         # Extraer las matrices aplanadas para el canal actual
-        # Usamos solo el triángulo superior para evitar redundancia
         n_rois = all_tensors.shape[2]
         iu_indices = np.triu_indices(n_rois, k=1)
         X_channel = all_tensors[:, i, :, :][:, iu_indices[0], iu_indices[1]]
         
-        # Calcular la información mutua para todas las características del canal
         mi_scores = mutual_info_classif(X_channel, y, random_state=42)
         
-        # La ganancia total de información del canal es la suma de la IM de sus características
         total_information_gain = np.sum(mi_scores)
         channel_information.append({'channel': ch_name, 'total_information_gain': total_information_gain})
 
-    # Crear y guardar el ranking
     ranking_df = pd.DataFrame(channel_information).sort_values('total_information_gain', ascending=False)
     ranking_path = save_dir / "ranking_canales_por_informacion_mutua.csv"
     ranking_df.to_csv(ranking_path, index=False)
     log.info(f"Ranking de canales guardado en: {ranking_path}")
 
-    # Visualizar el ranking
     plt.figure(figsize=(12, 8))
     sns.barplot(x='total_information_gain', y='channel', data=ranking_df, palette='plasma')
     plt.title('Ranking de Relevancia de Canales de Conectividad', fontsize=16)
@@ -134,10 +129,67 @@ def rank_channels_by_information_gain(df: pd.DataFrame, cfg: dict, save_dir: Pat
     
     del all_tensors; gc.collect()
 
-# --- Fin de la Nueva Sección ---
-
-
 # --- 2. Funciones de Análisis Exploratorio (Se ejecutan sobre TODOS los datos) ---
+
+def plot_channel_data_distribution(df: pd.DataFrame, cfg: dict, save_dir: Path):
+    """
+    Analiza y grafica la distribución de los valores de conectividad para cada canal,
+    separado por los grupos 'CN' y 'AD', para informar la elección de la función
+    de activación del decoder.
+    """
+    log.info("Iniciando análisis de distribución de datos por canal para CN y AD...")
+    
+    df_filtered = df[df['ResearchGroup'].isin(['CN', 'AD'])].copy()
+    if df_filtered.empty:
+        log.warning("No se encontraron sujetos CN o AD para el análisis de distribución. Omitiendo.")
+        return
+
+    channel_names = [name for name, enabled in cfg.get('channels', {}).items() if enabled]
+    n_channels = len(channel_names)
+    
+    tensors_cache = {
+        row['subject_id']: np.load(row['tensor_path']) 
+        for _, row in df_filtered.iterrows() if pd.notna(row['tensor_path'])
+    }
+
+    n_cols = min(3, n_channels)
+    n_rows = (n_channels + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 6, n_rows * 4), squeeze=False, constrained_layout=True)
+    axes = axes.flatten()
+    fig.suptitle('Distribución de Valores de Conectividad (Fuera de la Diagonal) por Canal y Grupo', fontsize=18, y=1.03)
+
+    for i, ch_name in enumerate(tqdm(channel_names, desc="Analizando distribución de canales")):
+        ax = axes[i]
+        cn_values, ad_values = [], []
+
+        for subject_id, group in df_filtered[['subject_id', 'ResearchGroup']].values:
+            if subject_id in tensors_cache:
+                tensor = tensors_cache[subject_id]
+                matrix = tensor[i, :, :]
+                off_diagonal_values = matrix[~np.eye(matrix.shape[0], dtype=bool)]
+                
+                if group == 'CN':
+                    cn_values.extend(off_diagonal_values)
+                elif group == 'AD':
+                    ad_values.extend(off_diagonal_values)
+        
+        sns.histplot(cn_values, color='blue', label='CN (Sanos)', ax=ax, stat='density', bins=50, kde=True)
+        sns.histplot(ad_values, color='red', label='AD (Alzheimer)', ax=ax, stat='density', bins=50, kde=True)
+        
+        ax.set_title(ch_name.replace("_", " ").title())
+        ax.set_xlabel("Valor de Conectividad")
+        ax.set_ylabel("Densidad")
+        ax.legend()
+
+    for j in range(i + 1, len(axes)):
+        axes[j].set_visible(False)
+        
+    plt.savefig(save_dir / 'distribucion_valores_por_canal_grupo.png', dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    log.info(f"Gráfico de distribución de datos por canal guardado en: {save_dir / 'distribucion_valores_por_canal_grupo.png'}")
+    
+    del tensors_cache; gc.collect()
+
 
 def plot_group_connectome_analysis(df: pd.DataFrame, cfg: dict, save_dir: Path):
     """Calcula y grafica las matrices promedio y de diferencia entre grupos."""
@@ -336,9 +388,9 @@ def main():
     plot_exploratory_feature_importance(df, feature_cols, analysis_dir)
     plot_latent_space_projections(df, feature_cols, analysis_dir)
     
-    # --- LLAMADA A LA NUEVA FUNCIÓN ---
-    # Se añade el nuevo análisis de relevancia de canales
+    # --- LLAMADAS A LAS NUEVAS FUNCIONES ---
     rank_channels_by_information_gain(df, cfg, analysis_dir)
+    plot_channel_data_distribution(df, cfg, analysis_dir) # <--- ANÁLISIS AÑADIDO
     
     # 2. Preparación y Exportación de Datos para Cross-Validation
     log.info("--- Paso 2: Iniciando Preparación de Datos para CV ---")
