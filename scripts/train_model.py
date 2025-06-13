@@ -1,61 +1,116 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-train_model.py (Versión Tesis v7.0 - Modular)
+train_model.py (v8.0 - Robusto y Reproducible)
 
 Script principal para orquestar el entrenamiento y evaluación de modelos
-híbridos de VAE y clasificadores. Este script utiliza el paquete `training`
-para mantener el código organizado y modular.
+híbridos de VAE y clasificadores.
+
+Esta versión está diseñada para consumir los artefactos pre-procesados
+generados por 'prepare_and_analyze_data.py', garantizando un pipeline
+robusto y 100% reproducible.
+
+Funcionalidades Clave:
+- Carga artefactos de datos autocontenidos (tensores, scalers, metadata).
+- Valida la integridad de los datos mediante hash SHA-256.
+- Sincroniza la configuración del experimento con los metadatos del artefacto.
+- Elimina cualquier reprocesamiento de datos en tiempo de ejecución.
 """
-from __future__ import annotations  # Para compatibilidad con Python 3.7+
+from __future__ import annotations
 import sys
 import yaml
 import logging
 import argparse
+import hashlib
 from pathlib import Path
 import pandas as pd
 import numpy as np
 import torch
 from sklearn.model_selection import StratifiedKFold, train_test_split
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from joblib import load
 
-# --- Añadir el directorio raíz del proyecto al path ---
-# Esto permite importar los módulos del paquete 'training'
+
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
-from training import data_handling, models, trainer, utils
+from training import models, trainer, utils
+from training import data_handling
 
-# --- Configuración del Logger ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 log = logging.getLogger(__name__)
 
+def load_and_validate_artifacts(data_dir: Path, args: argparse.Namespace) -> dict | None:
+    """
+    Carga todos los artefactos de datos y metadatos desde el directorio
+    pre-procesado, validando su integridad.
+    """
+    log.info(f"Cargando artefactos pre-procesados desde: {data_dir}")
+    
+    try:
+        with open(data_dir / "meta.yaml", 'r') as f:
+            meta = yaml.safe_load(f)
+
+        if args.final_activation and args.final_activation != meta.get("recommended_final_activation"):
+            log.warning(
+                f"Conflicto de activación: El experimento pide '{args.final_activation}' pero los datos "
+                f"fueron preparados para '{meta['recommended_final_activation']}'. Se usará el valor del experimento."
+            )
+        else:
+            args.final_activation = meta.get("recommended_final_activation", "tanh")
+        log.info(f"Activación final confirmada para el VAE: {args.final_activation}")
+
+        all_tensors_preprocessed = np.load(data_dir / "tensors_preprocessed.npy")
+        
+        tensor_hash_check = hashlib.sha256(all_tensors_preprocessed.tobytes()).hexdigest()
+        assert tensor_hash_check == meta['tensor_sha256'], "¡El hash de los tensores no coincide! Los datos pueden estar corruptos."
+        log.info("Verificación de integridad de tensores (SHA-256) superada.")
+
+        dataset = {
+            'key_df': pd.read_csv(data_dir / "cv_subjects_key.csv"),
+            'tensors': all_tensors_preprocessed,
+            'features_unscaled': np.load(data_dir / "features_unscaled.npy"),
+            'scalar_scaler': load(data_dir / "scalar_features_scaler.pkl"),
+            'age_scaler': load(data_dir / "age_scaler.pkl"),
+            'sex_encoder': load(data_dir / "sex_encoder.pkl"),
+            'meta': meta
+        }
+        
+        # Selección de canales si se especifica
+        channels_to_use = args.channels_to_use
+        if channels_to_use:
+            log.info(f"Seleccionando canales en los índices: {channels_to_use}")
+            dataset['tensors'] = dataset['tensors'][:, channels_to_use, :, :]
+
+        return dataset
+
+    except FileNotFoundError as e:
+        log.critical(f"Error: No se encontró el artefacto esperado en '{data_dir}'. Detalle: {e}")
+        log.critical("Asegúrate de haber ejecutado 'prepare_and_analyze_data.py' primero.")
+        return None
+    except AssertionError as e:
+        log.critical(f"Error de validación: {e}")
+        return None
+
+
 def main(args: argparse.Namespace):
-    """
-    Función principal que orquesta todo el pipeline de entrenamiento y evaluación.
-    """
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info(f"Dispositivo seleccionado: {device}")
     log.info(f"Configuración de la ejecución: {vars(args)}")
 
-    # --- 1. Carga y Pre-procesado de Datos ---
-    dataset = data_handling.load_full_dataset(Path(args.run_dir) / "data_for_cv", args.channels_to_use)
+    data_dir = Path(args.run_dir) / "data_for_cv"
+    dataset = load_and_validate_artifacts(data_dir, args)
     if not dataset:
-        log.critical("No se pudieron cargar los datos. Abortando.")
         return
-    
-    dataset['tensors'] = data_handling.preprocess_tensors_robustly(dataset['tensors'])
-    
+
     key_df = dataset['key_df']
     all_tensors = dataset['tensors']
-    all_scalar_features = dataset['features']
+    all_scalar_features_unscaled = dataset['features_unscaled']
     
     key_df['strat_key'] = key_df.apply(lambda row: '_'.join([str(row[col]) for col in args.stratify_on]), axis=1)
     y_labels = key_df['ResearchGroup'].astype('category').cat.codes.values
     
-    # --- 2. Bucle de Validación Cruzada ---
     skf = StratifiedKFold(n_splits=args.n_folds, shuffle=True, random_state=args.seed)
     all_final_metrics = []
 
@@ -63,58 +118,45 @@ def main(args: argparse.Namespace):
         fold_idx_str = f"Fold {fold_idx + 1}/{args.n_folds}"
         log.info(f"--- Iniciando {fold_idx_str} ---")
 
-        # División de datos y logging de balance
         df_train, df_test = key_df.iloc[train_idx], key_df.iloc[test_idx]
-        log.info(f"Balance de grupos en {fold_idx_str} - TRAIN:\n{df_train[args.stratify_on].value_counts(normalize=True).sort_index()}")
-        log.info(f"Balance de grupos en {fold_idx_str} - TEST:\n{df_test[args.stratify_on].value_counts(normalize=True).sort_index()}")
-
         X_train_tensors, X_test_tensors = all_tensors[train_idx], all_tensors[test_idx]
-        X_train_scalar, X_test_scalar = all_scalar_features[train_idx], all_scalar_features[test_idx]
+        X_train_scalar_unscaled, X_test_scalar_unscaled = all_scalar_features_unscaled[train_idx], all_scalar_features_unscaled[test_idx]
         y_train, y_test = y_labels[train_idx], y_labels[test_idx]
 
-        # Split para validación interna del VAE
+        assert X_train_tensors.min() >= -1.0 and X_train_tensors.max() <= 1.0, f"Fold {fold_idx}: Los tensores de entrenamiento están fuera del rango [-1, 1]"
+
         vae_train_tensors, vae_val_tensors, _, _ = train_test_split(
             X_train_tensors, y_train, test_size=0.15, stratify=y_train, random_state=args.seed)
 
-        # Manejo de Metadatos (Edad y Sexo)
-        age_scaler = StandardScaler().fit(df_train[['Age']])
-        X_train_age = age_scaler.transform(df_train[['Age']])
-        X_test_age = age_scaler.transform(df_test[['Age']])
+        X_train_age = dataset['age_scaler'].transform(df_train[['Age']])
+        X_test_age = dataset['age_scaler'].transform(df_test[['Age']])
         
-        sex_encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore').fit(df_train[['Sex']])
-        X_train_sex = sex_encoder.transform(df_train[['Sex']])
-        X_test_sex = sex_encoder.transform(df_test[['Sex']])
+        X_train_sex = dataset['sex_encoder'].transform(df_train[['Sex']])
+        X_test_sex = dataset['sex_encoder'].transform(df_test[['Sex']])
         
         X_train_metadata = np.concatenate([X_train_age, X_train_sex], axis=1)
         X_test_metadata = np.concatenate([X_test_age, X_test_sex], axis=1)
 
-        # Normalización de características escalares (Topo/HMM)
-        scalar_scaler = StandardScaler().fit(X_train_scalar)
-        X_train_scalar_scaled = scalar_scaler.transform(X_train_scalar)
-        X_test_scalar_scaled = scalar_scaler.transform(X_test_scalar)
+        X_train_scalar_scaled = dataset['scalar_scaler'].transform(X_train_scalar_unscaled)
+        X_test_scalar_scaled = dataset['scalar_scaler'].transform(X_test_scalar_unscaled)
 
-        # --- 3. Entrenamiento del VAE ---
         vae_model, history = trainer.train_vae_for_fold(vae_train_tensors, vae_val_tensors, args, fold_idx_str, device)
         utils.plot_vae_training_history(history, fold_idx + 1, output_dir)
 
-        # --- 4. Creación de Vectores Híbridos ---
         X_train_hybrid = data_handling.create_final_feature_vector(vae_model, X_train_tensors, X_train_scalar_scaled, X_train_metadata, device)
         X_test_hybrid = data_handling.create_final_feature_vector(vae_model, X_test_tensors, X_test_scalar_scaled, X_test_metadata, device)
 
-        # --- 5. Entrenamiento de Clasificadores ---
         fold_metrics = trainer.train_and_evaluate_classifiers(
             X_train_hybrid, y_train, X_test_hybrid, y_test,
             args.classifier_types, args.seed, fold_idx_str
         )
         all_final_metrics.extend(fold_metrics)
 
-    # --- 6. Reporte Final ---
     metrics_df = pd.DataFrame(all_final_metrics)
     log.info("\n--- Resumen Final de Rendimiento (Promedio sobre Folds) ---")
     log.info(f"\n{metrics_df.groupby('classifier').mean(numeric_only=True).to_string()}")
     metrics_df.to_csv(output_dir / "final_performance_metrics.csv", index=False)
     log.info(f"\nResultados detallados guardados en: {output_dir / 'final_performance_metrics.csv'}")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)
@@ -128,13 +170,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         parents=[parser],
-        description="Entrenamiento de β-VAE + Clasificador Híbrido con CV y HP-Tuning (v7.0).",
+        description="Entrenamiento de β-VAE + Clasificador Híbrido con CV y HP-Tuning (v8.0).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     group_data = parser.add_argument_group('Data and Paths')
-    group_data.add_argument('--run_dir', type=str, help="Ruta a la carpeta de la corrida que contiene 'data_for_cv'.")
-    group_data.add_argument('--output_dir', type=str, help="Directorio para guardar resultados.")
-    group_data.add_argument('--channels_to_use', type=int, nargs='*')
+    group_data.add_argument('--run_dir', type=str, help="Ruta a la carpeta de la corrida que contiene el directorio 'data_for_cv'.")
+    group_data.add_argument('--output_dir', type=str, help="Directorio para guardar resultados del entrenamiento.")
+    group_data.add_argument('--channels_to_use', type=int, nargs='*', help="Índices de canales a seleccionar del tensor pre-procesado.")
     
     group_vae_arch = parser.add_argument_group('VAE Architecture')
     group_vae_arch.add_argument('--latent_dim', type=int)
@@ -146,7 +188,7 @@ if __name__ == "__main__":
     group_vae_arch.add_argument('--vae_strides', type=int, nargs='+')
     group_vae_arch.add_argument('--intermediate_fc_dim', type=int)
     group_vae_arch.add_argument('--use_layernorm_fc', action='store_true')
-    group_vae_arch.add_argument('--final_activation', type=str, choices=['tanh', 'sigmoid', 'linear'])
+    group_vae_arch.add_argument('--final_activation', type=str, choices=['tanh', 'sigmoid', 'linear'], help="Si no se especifica, se usará el valor de meta.yaml.")
     
     group_train = parser.add_argument_group('Training Parameters')
     group_train.add_argument('--beta', type=float)
@@ -175,6 +217,6 @@ if __name__ == "__main__":
     args = parser.parse_args(remaining_argv)
     
     if not args.run_dir:
-        parser.error("El argumento --run_dir es obligatorio (o debe estar en el archivo de configuración).")
+        parser.error("--run_dir es obligatorio, ya sea como argumento de línea de comandos o en el archivo de configuración.")
 
     main(args)

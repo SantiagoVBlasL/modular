@@ -29,30 +29,53 @@ def load_full_dataset(data_dir: Path, channel_indices: list[int] | None) -> dict
         log.error(f"Error: Archivo no encontrado en {data_dir}. Ejecuta 'prepare_and_analyze_data.py' primero. Detalle: {e}")
         return None
 
-def preprocess_tensors_robustly(tensors: np.ndarray) -> np.ndarray:
-    """Aplica un pre-procesado robusto a todo el conjunto de tensores para alinear con la activación 'tanh'."""
+def preprocess_tensors_robustly(
+        tensors: np.ndarray,
+        return_scalers: bool = False
+    ) -> tuple[np.ndarray, list[float]] | np.ndarray:
+    """
+    Aplica un pre-procesado robusto a los tensores para alinear con 'tanh'.
+
+    Params
+    ------
+    tensors : np.ndarray
+        Tensor 4-D (N, C, H, W)
+    return_scalers : bool
+        Si True, devuelve también la lista de valores p99.5 usados por canal.
+
+    Returns
+    -------
+    np.ndarray
+        Tensores normalizados.
+    list[float]  (opcional)
+        p99.5 por canal, en el mismo orden que los canales.
+    """
     log.info("Iniciando pre-procesado robusto de tensores...")
     tensors_processed = np.copy(tensors)
 
     # 1. Poner a cero la diagonal
-    log.info("Paso 1: Poniendo a cero la diagonal de las matrices.")
     for i in range(tensors_processed.shape[0]):
         for j in range(tensors_processed.shape[1]):
             np.fill_diagonal(tensors_processed[i, j], 0)
 
-    # 2. Escalar robustamente a [-1, 1] por canal
-    log.info("Paso 2: Aplicando escalado robusto por canal para ajustar a rango [-1, 1].")
+    # 2. Escalado robusto
+    p99_5_vals = []
     for i in range(tensors_processed.shape[1]):
         p_max = np.percentile(np.abs(tensors_processed[:, i, :, :]), 99.5)
-        if p_max < 1e-6: 
-            log.warning(f"  - Canal {i}: Percentil 99.5 es casi cero ({p_max:.2e}). Se usará 1.0 para evitar división por cero.")
+        if p_max < 1e-6:
+            log.warning(f"Canal {i}: p99.5≈0, usando 1.0")
             p_max = 1.0
-        
-        tensors_processed[:, i, :, :] = np.clip(tensors_processed[:, i, :, :] / p_max, -1.0, 1.0)
-        log.info(f"  - Canal {i}: Escalado con p99.5 = {p_max:.4f}. Rango final: [{np.min(tensors_processed[:, i, :, :]):.2f}, {np.max(tensors_processed[:, i, :, :]):.2f}]")
+        tensors_processed[:, i] = np.clip(tensors_processed[:, i] / p_max, -1.0, 1.0)
+        p99_5_vals.append(float(p_max))
+        log.info(f"Canal {i}: p99.5={p_max:.4f}  → rango [{tensors_processed[:, i].min():.2f}, "
+                 f"{tensors_processed[:, i].max():.2f}]")
 
-    log.info("Pre-procesado de tensores completado.")
+    log.info("Pre-procesado completado.")
+
+    if return_scalers:
+        return tensors_processed, p99_5_vals
     return tensors_processed
+
 
 def create_final_feature_vector(vae_model, tensors, scalar_features, age_sex_features, device):
     """Genera el vector de características híbrido final para el clasificador."""
