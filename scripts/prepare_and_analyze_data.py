@@ -25,7 +25,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.feature_selection import mutual_info_classif # <--- Importación añadida
 import umap
 from tqdm import tqdm
 from typing import Optional, Dict, List, Tuple
@@ -71,16 +72,70 @@ def load_and_consolidate_data(run_dir_name: str, meta_file: str) -> Optional[Tup
 
     log.info(f"Datos cargados y consolidados para {len(merged_df)} sujetos.")
     
-    # --- **MEJORA: Consolidar etiquetas EMCI y LMCI en MCI** ---
-    mci_labels_to_consolidate = ['EMCI', 'LMCI']
+    mci_labels_to_consolidate = ['EMCI', 'LMCI', 'MCI']
     original_counts = merged_df['ResearchGroup'].value_counts()
     log.info(f"Distribución de grupos original: \n{original_counts}")
     merged_df['ResearchGroup'] = merged_df['ResearchGroup'].replace(mci_labels_to_consolidate, 'MCI')
     consolidated_counts = merged_df['ResearchGroup'].value_counts()
     log.info(f"Distribución de grupos consolidada: \n{consolidated_counts}")
-    # --- Fin de la mejora ---
 
     return merged_df, run_path, cfg
+
+# --- NUEVA SECCIÓN: Análisis de Canales por Teoría de la Información ---
+
+def rank_channels_by_information_gain(df: pd.DataFrame, cfg: dict, save_dir: Path):
+    """
+    Calcula la Información Mutua entre cada canal de conectividad y las etiquetas de grupo
+    para rankear los canales por su relevancia para la clasificación.
+    """
+    log.info("Iniciando ranking de canales por ganancia de información (Mutual Information)...")
+    
+    channel_names = [name for name, enabled in cfg.get('channels', {}).items() if enabled]
+    
+    # Cargar todos los tensores y prepararlos
+    df_filtered = df.dropna(subset=['tensor_path', 'ResearchGroup']).reset_index(drop=True)
+    all_tensors = np.stack([np.load(p) for p in tqdm(df_filtered['tensor_path'], desc="Cargando tensores para análisis de IM")])
+    
+    # Preparar las etiquetas de clase (y)
+    le = LabelEncoder()
+    y = le.fit_transform(df_filtered['ResearchGroup'])
+    
+    channel_information = []
+
+    for i, ch_name in enumerate(tqdm(channel_names, desc="Analizando Canales")):
+        # Extraer las matrices aplanadas para el canal actual
+        # Usamos solo el triángulo superior para evitar redundancia
+        n_rois = all_tensors.shape[2]
+        iu_indices = np.triu_indices(n_rois, k=1)
+        X_channel = all_tensors[:, i, :, :][:, iu_indices[0], iu_indices[1]]
+        
+        # Calcular la información mutua para todas las características del canal
+        mi_scores = mutual_info_classif(X_channel, y, random_state=42)
+        
+        # La ganancia total de información del canal es la suma de la IM de sus características
+        total_information_gain = np.sum(mi_scores)
+        channel_information.append({'channel': ch_name, 'total_information_gain': total_information_gain})
+
+    # Crear y guardar el ranking
+    ranking_df = pd.DataFrame(channel_information).sort_values('total_information_gain', ascending=False)
+    ranking_path = save_dir / "ranking_canales_por_informacion_mutua.csv"
+    ranking_df.to_csv(ranking_path, index=False)
+    log.info(f"Ranking de canales guardado en: {ranking_path}")
+
+    # Visualizar el ranking
+    plt.figure(figsize=(12, 8))
+    sns.barplot(x='total_information_gain', y='channel', data=ranking_df, palette='plasma')
+    plt.title('Ranking de Relevancia de Canales de Conectividad', fontsize=16)
+    plt.xlabel('Ganancia de Información Total (Información Mutua con Etiquetas de Grupo)')
+    plt.ylabel('Canal de Conectividad')
+    plt.tight_layout()
+    plt.savefig(save_dir / 'ranking_canales_por_informacion_mutua.png', dpi=200)
+    plt.close()
+    
+    del all_tensors; gc.collect()
+
+# --- Fin de la Nueva Sección ---
+
 
 # --- 2. Funciones de Análisis Exploratorio (Se ejecutan sobre TODOS los datos) ---
 
@@ -91,7 +146,6 @@ def plot_group_connectome_analysis(df: pd.DataFrame, cfg: dict, save_dir: Path):
     channel_names = [name for name, enabled in cfg.get('channels', {}).items() if enabled]
     n_channels = len(channel_names)
     
-    # Usar un diccionario para cargar los tensores solo una vez
     tensors_cache = {row['subject_id']: np.load(row['tensor_path']) for _, row in df.iterrows() if pd.notna(row['tensor_path'])}
     
     group_means = {}
@@ -101,7 +155,6 @@ def plot_group_connectome_analysis(df: pd.DataFrame, cfg: dict, save_dir: Path):
         if group_tensors:
             group_means[group] = np.mean(np.stack(group_tensors), axis=0)
 
-    # Graficar matrices promedio
     fig, axes = plt.subplots(n_channels, len(groups), figsize=(len(groups) * 5, n_channels * 4.5), squeeze=False, constrained_layout=True)
     fig.suptitle('Matrices de Conectividad Promedio por Grupo', fontsize=20, y=1.03)
     for i, ch_name in enumerate(channel_names):
@@ -115,7 +168,6 @@ def plot_group_connectome_analysis(df: pd.DataFrame, cfg: dict, save_dir: Path):
     plt.savefig(save_dir / 'connectomas_promedio_por_grupo.png', dpi=200, bbox_inches='tight')
     plt.close(fig)
 
-    # Graficar matrices de diferencia
     if 'AD' in group_means and 'CN' in group_means:
         fig, axes = plt.subplots(1, n_channels, figsize=(n_channels * 5, 4.5), squeeze=False, constrained_layout=True)
         fig.suptitle('Diferencia de Conectividad (AD - CN)', fontsize=20, y=1.03)
@@ -172,9 +224,9 @@ def perform_statistical_tests(df: pd.DataFrame, feature_cols: List[str], save_di
         results.append({
             'feature': feature,
             'p_value': p_value,
-            'dunn_CN_vs_MCI': dunn_results.loc['CN', 'MCI'] if dunn_results is not None and 'MCI' in dunn_results.columns else 'N/A',
+            'dunn_CN_vs_MCI': dunn_results.loc['CN', 'MCI'] if dunn_results is not None and 'MCI' in dunn_results.columns and 'CN' in dunn_results.index else 'N/A',
             'dunn_CN_vs_AD': dunn_results.loc['CN', 'AD'] if dunn_results is not None else 'N/A',
-            'dunn_MCI_vs_AD': dunn_results.loc['MCI', 'AD'] if dunn_results is not None and 'MCI' in dunn_results.columns else 'N/A',
+            'dunn_MCI_vs_AD': dunn_results.loc['MCI', 'AD'] if dunn_results is not None and 'MCI' in dunn_results.index and 'AD' in dunn_results.columns else 'N/A',
         })
     pd.DataFrame(results).sort_values('p_value').to_csv(save_dir / 'analisis_estadistico_caracteristicas.csv', index=False)
     log.info(f"Resultados estadísticos guardados en {save_dir / 'analisis_estadistico_caracteristicas.csv'}")
@@ -233,25 +285,20 @@ def export_dataset_for_cv(df: pd.DataFrame, feature_cols: list, run_path: Path):
     """
     log.info("--- Iniciando Preparación de Datos para Cross-Validation ---")
     
-    # Seleccionar solo las columnas necesarias para el modelado
     cols_for_modeling = ['subject_id', 'tensor_path', 'ResearchGroup', 'Sex', 'Age'] + feature_cols
     df_model = df[cols_for_modeling].copy()
     
-    # Filtrar sujetos sin datos completos en las columnas seleccionadas
     df_model.dropna(inplace=True)
     df_model.reset_index(drop=True, inplace=True)
     log.info(f"Se exportarán {len(df_model)} sujetos con datos completos para la CV.")
     
-    # Guardar los artefactos en una carpeta específica
     save_dir = run_path / "data_for_cv"
     save_dir.mkdir(exist_ok=True)
     
-    # a. Guardar el DataFrame clave con metadatos y rutas
     key_df_path = save_dir / "cv_subjects_key.csv"
     df_model.to_csv(key_df_path, index=False)
     log.info(f"Archivo clave de sujetos para CV guardado en: {key_df_path}")
     
-    # b. Guardar los tensores y características en arrays numpy separados
     all_tensors = np.stack([np.load(p) for p in tqdm(df_model['tensor_path'], desc="Apilando tensores")])
     all_features_unscaled = df_model[feature_cols].values
     
@@ -269,15 +316,12 @@ def main():
     parser.add_argument('--meta', default='SubjectsData_Schaefer400.csv', help="CSV con metadatos de los sujetos.")
     args = parser.parse_args()
 
-    # Cargar y consolidar los datos completos
     df, run_path, cfg = load_and_consolidate_data(args.run, args.meta)
     if df is None: return
 
-    # Crear directorio para las figuras del análisis
     analysis_dir = run_path / "analisis_tesis_exploratorio"
     analysis_dir.mkdir(exist_ok=True)
     
-    # Identificar columnas de características
     feature_cols = [c for c in df.columns if c.startswith(('topo_', 'hmm_')) and pd.api.types.is_numeric_dtype(df[c])]
     feature_cols = [c for c in feature_cols if df[c].std(skipna=True) > 1e-6]
 
@@ -291,6 +335,10 @@ def main():
     perform_statistical_tests(df, feature_cols, analysis_dir)
     plot_exploratory_feature_importance(df, feature_cols, analysis_dir)
     plot_latent_space_projections(df, feature_cols, analysis_dir)
+    
+    # --- LLAMADA A LA NUEVA FUNCIÓN ---
+    # Se añade el nuevo análisis de relevancia de canales
+    rank_channels_by_information_gain(df, cfg, analysis_dir)
     
     # 2. Preparación y Exportación de Datos para Cross-Validation
     log.info("--- Paso 2: Iniciando Preparación de Datos para CV ---")

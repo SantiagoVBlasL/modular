@@ -1,34 +1,53 @@
-# --- Archivo de Configuración: Experimento Optimizado para Tesis ---
-# Descripción: Ejecución con 8 canales, β-VAE (beta=2.5), y entrenamiento
-#              del VAE mejorado para obtener características latentes más ricas.
-# Objetivo: Maximizar el rendimiento del clasificador final.
+# Archivo de Configuración: Experimento Tesis v5.0 (Arquitectura Modular)
+# --------------------------------------------------------------------
+# Descripción: Ejecución con arquitectura de VAE configurable, incluyendo
+#              capas convolucionales y lineales definidas por el usuario.
 
 # --- Rutas y Selección de Datos ---
 run_dir: './connectivity_features/connectivity_8ch_20250611_154317'
-output_dir: './results/exp_beta2.5_ld256_e300_adamw'
-channels_to_use: [0, 1, 2, 3, 4, 5, 6, 7] # Usar toda la información disponible
+output_dir: './results/exp_modular_v5'
+# Canales seleccionados según el ranking de información mutua.
+# Puedes ajustar esto basado en tus análisis.
+channels_to_use: [0, 2, 3, 4, 5, 7]
 
-# --- Hiperparámetros del VAE ---
-latent_dim: 512        # Aumentamos la capacidad vs 128
-beta: 1.5              # Un valor > 1 para un β-VAE, pero no tan agresivo como 4.0
-dropout_rate: 0.1    # Un dropout estándar
+# --- Arquitectura del VAE (NUEVA SECCIÓN MODULAR) ---
+latent_dim: 512
+num_conv_layers: 4
+decoder_type: 'convtranspose' # 'convtranspose' o 'upsample_conv'
+# Canales de salida para cada capa convolucional del encoder
+vae_conv_channels: [32, 64, 128, 256]
+# Tamaños de kernel para cada capa convolucional del encoder
+vae_kernel_sizes: [7, 5, 5, 3]
+# Paddings para cada capa
+vae_paddings: [1, 1, 1, 1]
+# Strides para cada capa
+vae_strides: [2, 2, 2, 2]
+# Dimensión de la capa lineal intermedia (0 para no usarla)
+intermediate_fc_dim: 2048
+# Usar LayerNorm en las capas lineales (muy recomendado)
+use_layernorm_fc: true
+# Función de activación final del decoder
+final_activation: 'tanh'
 
-# --- Parámetros de Entrenamiento Avanzados ---
-epochs: 550            # Más épocas para asegurar la convergencia del VAE
-lr: 0.0001             # Un learning rate ligeramente más alto, común en AdamW
-batch_size: 32         # Un batch size más grande para estabilizar el gradiente
-weight_decay: 0.00001     # Regularización L2 fuerte, clave en AdamW
-early_stopping: 45     # Paciencia de 40 épocas antes de detener
-beta_cycles: 3         # Annealing más gradual de beta
-kl_start_epoch: 15     # Retrasa la regularización KLD para que el VAE aprenda a reconstruir primero
-optimizer: 'adamw'     # AdamW es a menudo superior a Adam, especialmente con weight_decay
-scheduler: 'cosine'    # Cosine annealing es un scheduler muy efectivo que a menudo supera a Plateau
-lr_warmup_epochs: 100   # Arranque suave del LR para evitar inestabilidad inicial
-clip_grad_norm: 1.0    # Previene la explosión de gradientes
+# --- Parámetros de Entrenamiento ---
+beta: 1.5
+dropout_rate: 0.2
+epochs: 550
+lr: 0.0001
+batch_size: 32
+weight_decay: 0.00001
+optimizer: 'adamw'
+scheduler: 'cosine'
+lr_warmup_epochs: 100
+beta_cycles: 3
+kl_start_epoch: 15
+early_stopping: 55
+clip_grad_norm: 1.0
 
 # --- Validación Cruzada y Clasificador ---
 n_folds: 5
-classifier_types: ['rf', 'svm', 'logreg']
+# Ahora con más opciones de clasificadores
+classifier_types: ['rf', 'svm', 'logreg', 'gb', 'mlp']
 stratify_on: ['ResearchGroup', 'Sex']
 
 # --- General ---
